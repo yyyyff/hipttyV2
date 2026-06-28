@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hiptty-core",
+    "crates/hiptty-adapter",
+    "crates/hiptty-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "rustls", "form", "multipart"] }
+cookie_store = "0.22"
+reqwest_cookie_store = "0.10"
+scraper = "0.22"
+encoding_rs = "0.8"
+md-5 = "0.10"
+regex = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+hiptty-core = { path = "crates/hiptty-core" }
+hiptty-adapter = { path = "crates/hiptty-adapter" }

@@ -1,0 +1,11 @@
+[package]
+name = "hiptty-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Domain types and errors for hiptty forum client"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
