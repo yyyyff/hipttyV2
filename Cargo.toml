@@ -4,6 +4,10 @@ members = [
     "crates/hiptty-core",
     "crates/hiptty-adapter",
     "crates/hiptty-cli",
+    "crates/hiptty-render",
+    "crates/hiptty-widgets",
+    "crates/hiptty-app",
+    "crates/hiptty",
 ]
 
 [workspace.package]
@@ -29,3 +33,10 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 hiptty-core = { path = "crates/hiptty-core" }
 hiptty-adapter = { path = "crates/hiptty-adapter" }
+hiptty-render = { path = "crates/hiptty-render" }
+hiptty-widgets = { path = "crates/hiptty-widgets" }
+hiptty-app = { path = "crates/hiptty-app" }
+ratatui = "0.30"
+crossterm = "0.28"
+unicode-width = "0.2"
+color-eyre = "0.6"

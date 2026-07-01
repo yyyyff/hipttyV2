@@ -6,6 +6,7 @@ license.workspace = true
 description = "Domain types and errors for hiptty forum client"
 
 [dependencies]
+md-5 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -1,19 +1,7 @@
 use std::io::IsTerminal;
 
 use dialoguer::{Input, Password, Select};
-use hiptty_core::{AdapterError, AdapterResult, Credentials};
-
-/// Discuz security questions (hipda `pref_login_question_list_*`).
-const SECURITY_QUESTIONS: &[(&str, &str)] = &[
-    ("0", "无安全提问"),
-    ("1", "母亲的名字"),
-    ("2", "爷爷的名字"),
-    ("3", "父亲出生的城市"),
-    ("4", "您其中一位老师的名字"),
-    ("5", "您个人计算机的型号"),
-    ("6", "您最喜欢的餐馆名称"),
-    ("7", "驾驶执照的最后四位数字"),
-];
+use hiptty_core::{AdapterError, AdapterResult, Credentials, SECURITY_QUESTIONS};
 
 pub fn gather_credentials(
     username: Option<String>,

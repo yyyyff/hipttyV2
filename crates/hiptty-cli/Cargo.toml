@@ -6,7 +6,7 @@ license.workspace = true
 description = "Headless forum client for 4d4y — agent-ready CLI"
 
 [[bin]]
-name = "hiptty"
+name = "hiptty-cli"
 path = "src/main.rs"
 
 [dependencies]

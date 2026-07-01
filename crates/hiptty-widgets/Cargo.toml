@@ -1,0 +1,12 @@
+[package]
+name = "hiptty-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable ratatui widgets for hiptty TUI"
+
+[dependencies]
+hiptty-core = { workspace = true }
+hiptty-render = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }

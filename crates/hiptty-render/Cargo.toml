@@ -1,0 +1,11 @@
+[package]
+name = "hiptty-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Theme and text helpers for hiptty TUI"
+
+[dependencies]
+hiptty-core = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }

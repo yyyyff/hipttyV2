@@ -3,7 +3,7 @@ use predicates::prelude::*;
 use serde_json::Value;
 
 fn hiptty() -> Command {
-    Command::cargo_bin("hiptty").unwrap()
+    Command::cargo_bin("hiptty-cli").unwrap()
 }
 
 fn parse_json(stdout: &[u8]) -> Value {
