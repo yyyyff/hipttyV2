@@ -92,7 +92,15 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
 }
 
 pub fn logo_color(tick: u64, palette: Palette) -> Color {
+    // 3s cycle at 50ms tick (60 frames)
     let phase = (tick % 60) as f32 / 60.0;
+    let t = ((phase * std::f32::consts::PI * 2.0).sin() + 1.0) / 2.0;
+    lerp_color(palette.logo_hi, palette.logo_pda, t)
+}
+
+/// Per-character hue shift for title logo breathing effect.
+pub fn logo_char_color(index: usize, tick: u64, palette: Palette) -> Color {
+    let phase = ((tick + index as u64 * 8) % 60) as f32 / 60.0;
     let t = ((phase * std::f32::consts::PI * 2.0).sin() + 1.0) / 2.0;
     lerp_color(palette.logo_hi, palette.logo_pda, t)
 }

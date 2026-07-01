@@ -1,4 +1,4 @@
-use hiptty_render::{logo_color, Palette};
+use hiptty_render::{logo_char_color, Palette};
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -30,12 +30,15 @@ pub fn draw_login_logo(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
 }
 
 pub fn draw_title_logo(frame: &mut Frame<'_>, area: Rect, palette: Palette, tick: u64) {
-    let color = logo_color(tick, palette);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "HIPDA",
-            Style::default().fg(color),
-        ))),
-        area,
-    );
+    let spans: Vec<Span> = "HIPDA"
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            Span::styled(
+                c.to_string(),
+                Style::default().fg(logo_char_color(i, tick, palette)),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

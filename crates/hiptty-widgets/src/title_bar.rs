@@ -1,6 +1,6 @@
 use hiptty_render::{truncate_str, Palette};
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     widgets::Paragraph,
     Frame,
 };
@@ -20,7 +20,9 @@ pub struct TitleBarProps<'a> {
 
 pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_>) {
     let [row1, row2] = title_bar_rows(area);
-    draw_title_logo(frame, row1, props.palette, props.tick);
+
+    let row1_cols = Layout::horizontal([Constraint::Length(8), Constraint::Min(0)]).split(row1);
+    draw_title_logo(frame, row1_cols[0], props.palette, props.tick);
 
     let mut right = String::new();
     if let Some(user) = props.username {
@@ -44,14 +46,18 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
             Paragraph::new(right)
                 .style(props.palette.secondary_style())
                 .alignment(Alignment::Right),
-            row1,
+            row1_cols[1],
         );
     }
 
-    let breadcrumb = truncate_str(props.breadcrumb, row2.width.saturating_sub(2) as usize);
+    let row2_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(18)]).split(row2);
+    let breadcrumb = truncate_str(
+        props.breadcrumb,
+        row2_cols[0].width.saturating_sub(1) as usize,
+    );
     frame.render_widget(
         Paragraph::new(breadcrumb).style(props.palette.primary_style()),
-        row2,
+        row2_cols[0],
     );
 
     if let Some(right_text) = props.breadcrumb_right {
@@ -59,7 +65,7 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
             Paragraph::new(right_text)
                 .style(props.palette.secondary_style())
                 .alignment(Alignment::Right),
-            row2,
+            row2_cols[1],
         );
     }
 }
