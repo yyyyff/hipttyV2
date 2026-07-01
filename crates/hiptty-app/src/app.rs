@@ -131,7 +131,7 @@ impl App {
         match self.overlay {
             Overlay::ForumPicker => "j/k  Enter  Esc",
             Overlay::None => match self.page {
-                Page::Login => "Tab 切换 · Esc 退出",
+                Page::Login => "Tab/↑↓ 切换 · Enter 确认 · Esc 退出",
                 Page::ThreadFeed => "j/k ↑↓  Enter  r  n  f  /  b",
             },
         }

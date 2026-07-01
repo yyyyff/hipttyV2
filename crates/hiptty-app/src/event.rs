@@ -54,7 +54,8 @@ fn handle_login_key(
 ) {
     match key.code {
         KeyCode::Esc => app.quit = true,
-        KeyCode::Tab | KeyCode::BackTab => cycle_login_focus(app, key.code == KeyCode::BackTab),
+        KeyCode::Tab | KeyCode::Down => cycle_login_focus(app, false),
+        KeyCode::BackTab | KeyCode::Up => cycle_login_focus(app, true),
         KeyCode::Char('h') | KeyCode::Left if app.login.focused == LoginField::SecurityQuestion => {
             app.login.security_index = app.login.security_index.saturating_sub(1);
         }

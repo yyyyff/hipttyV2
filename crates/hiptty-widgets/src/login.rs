@@ -1,5 +1,5 @@
 use hiptty_core::{security_question_label, SECURITY_QUESTIONS};
-use hiptty_render::Palette;
+use hiptty_render::{truncate_str, Palette};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -9,6 +9,11 @@ use ratatui::{
 };
 
 use crate::logo::draw_login_logo;
+
+/// Total width of the centered login form (label + input).
+const FORM_WIDTH: u16 = 52;
+const LABEL_WIDTH: u16 = 10;
+const INPUT_WIDTH: usize = (FORM_WIDTH - LABEL_WIDTH - 1) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginField {
@@ -30,97 +35,108 @@ pub struct LoginFormProps<'a> {
     pub loading: bool,
 }
 
+struct InputRowProps<'a> {
+    label: &'a str,
+    value: &'a str,
+    placeholder: &'a str,
+    focused: bool,
+    disabled: bool,
+}
+
 pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) {
+    let form_height = 18u16;
+    let form_x = area.x + area.width.saturating_sub(FORM_WIDTH) / 2;
+    let form_y = area.y + area.height.saturating_sub(form_height) / 2;
+    let form = Rect {
+        x: form_x,
+        y: form_y,
+        width: FORM_WIDTH.min(area.width),
+        height: form_height.min(area.height),
+    };
+
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .split(area);
+    .split(form);
 
     draw_login_logo(frame, chunks[0], props.palette);
 
     let label_style = props.palette.secondary_style();
-    let field_style = |focused: bool| {
-        if focused {
-            Style::default()
-                .fg(props.palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            props.palette.primary_style()
-        }
-    };
 
-    draw_labeled_field(
+    draw_text_input(
         frame,
         chunks[2],
-        "用户名",
-        props.username,
-        props.focused == LoginField::Username,
+        InputRowProps {
+            label: "用户名",
+            value: props.username,
+            placeholder: "",
+            focused: props.focused == LoginField::Username,
+            disabled: false,
+        },
         label_style,
-        field_style(props.focused == LoginField::Username),
+        props.palette,
     );
-    draw_labeled_field(
+    draw_text_input(
         frame,
         chunks[3],
-        "密码",
-        &"*".repeat(props.password.chars().count()),
-        props.focused == LoginField::Password,
+        InputRowProps {
+            label: "密码",
+            value: &"*".repeat(props.password.chars().count()),
+            placeholder: "",
+            focused: props.focused == LoginField::Password,
+            disabled: false,
+        },
         label_style,
-        field_style(props.focused == LoginField::Password),
+        props.palette,
     );
 
     let qid = SECURITY_QUESTIONS[props.security_index].0;
     let q_label = security_question_label(qid);
-    let q_display = format!("[ {q_label}  ◂ ▸ ]");
-    draw_labeled_field(
+    draw_security_picker(
         frame,
         chunks[4],
         "安全提问",
-        &q_display,
+        q_label,
         props.focused == LoginField::SecurityQuestion,
         label_style,
-        field_style(props.focused == LoginField::SecurityQuestion),
+        props.palette,
     );
 
     let answer_active = props.security_index > 0;
-    let answer_style = if answer_active {
-        field_style(props.focused == LoginField::SecurityAnswer)
-    } else {
-        props.palette.dim_style()
-    };
-    draw_labeled_field(
+    draw_text_input(
         frame,
         chunks[5],
-        "回答",
-        if answer_active {
-            props.security_answer
-        } else {
-            ""
+        InputRowProps {
+            label: "回答",
+            value: if answer_active {
+                props.security_answer
+            } else {
+                ""
+            },
+            placeholder: if answer_active { "" } else { "—" },
+            focused: props.focused == LoginField::SecurityAnswer && answer_active,
+            disabled: !answer_active,
         },
-        props.focused == LoginField::SecurityAnswer && answer_active,
         label_style,
-        answer_style,
+        props.palette,
     );
 
-    let submit_label = if props.loading {
-        "[  登录中...  ]"
-    } else {
-        "[  登  录  ]  (Enter 确认)"
-    };
-    let submit_style = field_style(props.focused == LoginField::Submit);
-    frame.render_widget(
-        Paragraph::new(submit_label)
-            .style(submit_style)
-            .alignment(Alignment::Center),
+    draw_submit_button(
+        frame,
         chunks[7],
+        props.focused == LoginField::Submit,
+        props.loading,
+        props.palette,
     );
 
     if let Some(err) = props.error {
@@ -133,27 +149,190 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
     }
 
     frame.render_widget(
-        Paragraph::new("Tab 切换 · Esc 退出")
+        Paragraph::new("Tab / ↑↓ 切换字段 · Enter 确认 · Esc 退出")
             .style(props.palette.dim_style())
             .alignment(Alignment::Center),
         chunks[9],
     );
 }
 
-fn draw_labeled_field(
+fn draw_text_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    row: InputRowProps<'_>,
+    label_style: Style,
+    palette: Palette,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    let [text_row, underline_row] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+
+    let display = if row.value.is_empty() && !row.placeholder.is_empty() {
+        row.placeholder.to_string()
+    } else {
+        truncate_str(row.value, INPUT_WIDTH.saturating_sub(1))
+    };
+
+    let value_style = if row.disabled {
+        palette.dim_style()
+    } else if row.focused {
+        palette.accent_style().add_modifier(Modifier::BOLD)
+    } else if row.value.is_empty() && !row.placeholder.is_empty() {
+        palette.dim_style()
+    } else {
+        palette.primary_style()
+    };
+
+    let underline_style = if row.disabled {
+        palette.dim_style()
+    } else if row.focused {
+        palette.accent_style()
+    } else {
+        palette.dim_style()
+    };
+
+    let label_area = Rect {
+        x: text_row.x,
+        y: text_row.y,
+        width: LABEL_WIDTH,
+        height: 1,
+    };
+    let input_area = Rect {
+        x: text_row.x + LABEL_WIDTH + 1,
+        y: text_row.y,
+        width: text_row.width.saturating_sub(LABEL_WIDTH + 1),
+        height: 1,
+    };
+
+    frame.render_widget(Paragraph::new(row.label).style(label_style), label_area);
+    frame.render_widget(Paragraph::new(display).style(value_style), input_area);
+
+    let underline = "─".repeat(input_area.width as usize);
+    frame.render_widget(
+        Paragraph::new(underline).style(underline_style),
+        Rect {
+            x: input_area.x,
+            y: underline_row.y,
+            width: input_area.width,
+            height: 1,
+        },
+    );
+}
+
+fn draw_security_picker(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
-    value: &str,
-    _focused: bool,
+    question: &str,
+    focused: bool,
     label_style: Style,
-    value_style: Style,
+    palette: Palette,
 ) {
-    let cols = Layout::horizontal([Constraint::Length(14), Constraint::Min(0)]).split(area);
+    if area.height < 2 {
+        return;
+    }
+
+    let [text_row, underline_row] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+
+    let arrow_style = if focused {
+        palette.accent_style()
+    } else {
+        palette.dim_style()
+    };
+    let text_style = if focused {
+        palette.accent_style().add_modifier(Modifier::BOLD)
+    } else {
+        palette.primary_style()
+    };
+    let underline_style = if focused {
+        palette.accent_style()
+    } else {
+        palette.dim_style()
+    };
+
+    let label_area = Rect {
+        x: text_row.x,
+        y: text_row.y,
+        width: LABEL_WIDTH,
+        height: 1,
+    };
+    let input_area = Rect {
+        x: text_row.x + LABEL_WIDTH + 1,
+        y: text_row.y,
+        width: text_row.width.saturating_sub(LABEL_WIDTH + 1),
+        height: 1,
+    };
+
+    frame.render_widget(Paragraph::new(label).style(label_style), label_area);
+
+    let q_trunc = truncate_str(question, INPUT_WIDTH.saturating_sub(6));
+    let line = Line::from(vec![
+        Span::styled("◂ ", arrow_style),
+        Span::styled(q_trunc, text_style),
+        Span::styled(" ▸", arrow_style),
+    ]);
+    frame.render_widget(Paragraph::new(line), input_area);
+
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(label, label_style))),
-        cols[0],
+        Paragraph::new("─".repeat(input_area.width as usize)).style(underline_style),
+        Rect {
+            x: input_area.x,
+            y: underline_row.y,
+            width: input_area.width,
+            height: 1,
+        },
     );
-    let display = format!("[{value}]");
-    frame.render_widget(Paragraph::new(display).style(value_style), cols[1]);
+}
+
+fn draw_submit_button(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    loading: bool,
+    palette: Palette,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    let label = if loading { "登录中…" } else { "登  录" };
+    let style = if focused {
+        palette.accent_style().add_modifier(Modifier::BOLD)
+    } else {
+        palette.primary_style()
+    };
+    let underline_style = if focused {
+        palette.accent_style()
+    } else {
+        palette.dim_style()
+    };
+
+    let text_width = label.chars().count() as u16;
+    let btn_x = area.x + area.width.saturating_sub(text_width) / 2;
+
+    frame.render_widget(
+        Paragraph::new(label).style(style),
+        Rect {
+            x: btn_x,
+            y: area.y,
+            width: text_width,
+            height: 1,
+        },
+    );
+
+    let underline_len = (text_width + 4).min(area.width) as usize;
+    let ul_x = area.x + area.width.saturating_sub(underline_len as u16) / 2;
+    frame.render_widget(
+        Paragraph::new("─".repeat(underline_len)).style(underline_style),
+        Rect {
+            x: ul_x,
+            y: area.y + 1,
+            width: underline_len as u16,
+            height: 1,
+        },
+    );
 }
