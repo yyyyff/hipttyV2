@@ -58,6 +58,7 @@ fn handle_login_key(
         KeyCode::BackTab | KeyCode::Up => cycle_login_focus(app, true),
         KeyCode::Char('h') | KeyCode::Left if app.login.focused == LoginField::SecurityQuestion => {
             app.login.security_index = app.login.security_index.saturating_sub(1);
+            normalize_login_focus(app);
         }
         KeyCode::Char('l') | KeyCode::Right
             if app.login.focused == LoginField::SecurityQuestion =>
@@ -65,6 +66,7 @@ fn handle_login_key(
             if app.login.security_index + 1 < hiptty_core::SECURITY_QUESTIONS.len() {
                 app.login.security_index += 1;
             }
+            normalize_login_focus(app);
         }
         KeyCode::Enter => {
             if app.login.focused == LoginField::Submit {
@@ -79,14 +81,27 @@ fn handle_login_key(
     }
 }
 
-fn cycle_login_focus(app: &mut App, reverse: bool) {
-    let fields = [
+fn login_focus_order(app: &App) -> Vec<LoginField> {
+    let mut fields = vec![
         LoginField::Username,
         LoginField::Password,
         LoginField::SecurityQuestion,
-        LoginField::SecurityAnswer,
-        LoginField::Submit,
     ];
+    if app.login.security_index > 0 {
+        fields.push(LoginField::SecurityAnswer);
+    }
+    fields.push(LoginField::Submit);
+    fields
+}
+
+fn normalize_login_focus(app: &mut App) {
+    if app.login.security_index == 0 && app.login.focused == LoginField::SecurityAnswer {
+        app.login.focused = LoginField::SecurityQuestion;
+    }
+}
+
+fn cycle_login_focus(app: &mut App, reverse: bool) {
+    let fields = login_focus_order(app);
     let pos = fields
         .iter()
         .position(|f| *f == app.login.focused)

@@ -1,5 +1,5 @@
 use hiptty_core::{security_question_label, SECURITY_QUESTIONS};
-use hiptty_render::{truncate_str, Palette};
+use hiptty_render::{str_width, truncate_str, Palette};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -14,6 +14,8 @@ use crate::logo::draw_login_logo;
 const FORM_WIDTH: u16 = 52;
 const LABEL_WIDTH: u16 = 10;
 const INPUT_WIDTH: usize = (FORM_WIDTH - LABEL_WIDTH - 1) as usize;
+const MIN_UNDERLINE: usize = 10;
+const MAX_UNDERLINE: usize = 22;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginField {
@@ -208,18 +210,24 @@ fn draw_text_input(
     };
 
     frame.render_widget(Paragraph::new(row.label).style(label_style), label_area);
+    let ul_w = underline_width(&display, input_area.width);
     frame.render_widget(Paragraph::new(display).style(value_style), input_area);
-
-    let underline = "─".repeat(input_area.width as usize);
     frame.render_widget(
-        Paragraph::new(underline).style(underline_style),
+        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
         Rect {
             x: input_area.x,
             y: underline_row.y,
-            width: input_area.width,
+            width: ul_w,
             height: 1,
         },
     );
+}
+
+fn underline_width(display: &str, max_available: u16) -> u16 {
+    let w = str_width(display)
+        .clamp(MIN_UNDERLINE, MAX_UNDERLINE)
+        .min(max_available as usize) as u16;
+    w.max(1)
 }
 
 fn draw_security_picker(
@@ -270,19 +278,20 @@ fn draw_security_picker(
     frame.render_widget(Paragraph::new(label).style(label_style), label_area);
 
     let q_trunc = truncate_str(question, INPUT_WIDTH.saturating_sub(6));
+    let picker_text = format!("◂ {q_trunc} ▸");
     let line = Line::from(vec![
         Span::styled("◂ ", arrow_style),
         Span::styled(q_trunc, text_style),
         Span::styled(" ▸", arrow_style),
     ]);
     frame.render_widget(Paragraph::new(line), input_area);
-
+    let ul_w = underline_width(&picker_text, input_area.width);
     frame.render_widget(
-        Paragraph::new("─".repeat(input_area.width as usize)).style(underline_style),
+        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
         Rect {
             x: input_area.x,
             y: underline_row.y,
-            width: input_area.width,
+            width: ul_w,
             height: 1,
         },
     );
@@ -311,7 +320,7 @@ fn draw_submit_button(
         palette.dim_style()
     };
 
-    let text_width = label.chars().count() as u16;
+    let text_width = str_width(label) as u16;
     let btn_x = area.x + area.width.saturating_sub(text_width) / 2;
 
     frame.render_widget(
@@ -319,12 +328,14 @@ fn draw_submit_button(
         Rect {
             x: btn_x,
             y: area.y,
-            width: text_width,
+            width: text_width.max(1),
             height: 1,
         },
     );
 
-    let underline_len = (text_width + 4).min(area.width) as usize;
+    let underline_len = (text_width as usize + 2)
+        .clamp(MIN_UNDERLINE, MAX_UNDERLINE)
+        .min(area.width as usize);
     let ul_x = area.x + area.width.saturating_sub(underline_len as u16) / 2;
     frame.render_widget(
         Paragraph::new("─".repeat(underline_len)).style(underline_style),

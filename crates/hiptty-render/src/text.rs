@@ -1,3 +1,7 @@
+pub fn str_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
 pub fn truncate_str(s: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
