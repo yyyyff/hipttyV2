@@ -10,12 +10,15 @@ use ratatui::{
 
 use crate::logo::draw_login_logo;
 
-/// Total width of the centered login form (label + input).
+/// Total width of the centered login form (logo + fields block).
 const FORM_WIDTH: u16 = 52;
 const LABEL_WIDTH: u16 = 10;
-const INPUT_WIDTH: usize = (FORM_WIDTH - LABEL_WIDTH - 1) as usize;
-const MIN_UNDERLINE: usize = 10;
-const MAX_UNDERLINE: usize = 22;
+const MIN_UNDERLINE: usize = 15;
+const MAX_UNDERLINE: usize = 30;
+const DEFAULT_UNDERLINE: usize = 15;
+/// Fixed width of label + gap + input column so field rows center as a block.
+const ROW_BLOCK_WIDTH: u16 = LABEL_WIDTH + 1 + MAX_UNDERLINE as u16;
+const INPUT_COL_WIDTH: u16 = MAX_UNDERLINE as u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginField {
@@ -158,6 +161,17 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
     );
 }
 
+/// Horizontally center the label+input row block within `area`.
+fn centered_row_block(area: Rect) -> Rect {
+    let width = ROW_BLOCK_WIDTH.min(area.width);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y,
+        width,
+        height: area.height,
+    }
+}
+
 fn draw_text_input(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -165,17 +179,18 @@ fn draw_text_input(
     label_style: Style,
     palette: Palette,
 ) {
-    if area.height < 2 {
+    let block = centered_row_block(area);
+    if block.height < 2 {
         return;
     }
 
     let [text_row, underline_row] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(block);
 
     let display = if row.value.is_empty() && !row.placeholder.is_empty() {
         row.placeholder.to_string()
     } else {
-        truncate_str(row.value, INPUT_WIDTH.saturating_sub(1))
+        truncate_str(row.value, INPUT_COL_WIDTH as usize)
     };
 
     let value_style = if row.disabled {
@@ -205,12 +220,14 @@ fn draw_text_input(
     let input_area = Rect {
         x: text_row.x + LABEL_WIDTH + 1,
         y: text_row.y,
-        width: text_row.width.saturating_sub(LABEL_WIDTH + 1),
+        width: INPUT_COL_WIDTH.min(text_row.width.saturating_sub(LABEL_WIDTH + 1)),
         height: 1,
     };
 
+    let empty_input = row.value.is_empty() && row.placeholder.is_empty();
+    let ul_w = underline_width(&display, empty_input);
+
     frame.render_widget(Paragraph::new(row.label).style(label_style), label_area);
-    let ul_w = underline_width(&display, input_area.width);
     frame.render_widget(Paragraph::new(display).style(value_style), input_area);
     frame.render_widget(
         Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
@@ -223,11 +240,18 @@ fn draw_text_input(
     );
 }
 
-fn underline_width(display: &str, max_available: u16) -> u16 {
-    let w = str_width(display)
-        .clamp(MIN_UNDERLINE, MAX_UNDERLINE)
-        .min(max_available as usize) as u16;
-    w.max(1)
+fn underline_width(display: &str, empty_input: bool) -> u16 {
+    let w = if empty_input {
+        DEFAULT_UNDERLINE
+    } else {
+        let content = str_width(display);
+        if content == 0 {
+            DEFAULT_UNDERLINE
+        } else {
+            content
+        }
+    };
+    w.clamp(MIN_UNDERLINE, MAX_UNDERLINE) as u16
 }
 
 fn draw_security_picker(
@@ -239,12 +263,13 @@ fn draw_security_picker(
     label_style: Style,
     palette: Palette,
 ) {
-    if area.height < 2 {
+    let block = centered_row_block(area);
+    if block.height < 2 {
         return;
     }
 
     let [text_row, underline_row] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(block);
 
     let arrow_style = if focused {
         palette.accent_style()
@@ -271,13 +296,13 @@ fn draw_security_picker(
     let input_area = Rect {
         x: text_row.x + LABEL_WIDTH + 1,
         y: text_row.y,
-        width: text_row.width.saturating_sub(LABEL_WIDTH + 1),
+        width: INPUT_COL_WIDTH.min(text_row.width.saturating_sub(LABEL_WIDTH + 1)),
         height: 1,
     };
 
     frame.render_widget(Paragraph::new(label).style(label_style), label_area);
 
-    let q_trunc = truncate_str(question, INPUT_WIDTH.saturating_sub(6));
+    let q_trunc = truncate_str(question, INPUT_COL_WIDTH as usize);
     let picker_text = format!("◂ {q_trunc} ▸");
     let line = Line::from(vec![
         Span::styled("◂ ", arrow_style),
@@ -285,7 +310,8 @@ fn draw_security_picker(
         Span::styled(" ▸", arrow_style),
     ]);
     frame.render_widget(Paragraph::new(line), input_area);
-    let ul_w = underline_width(&picker_text, input_area.width);
+
+    let ul_w = underline_width(&picker_text, false);
     frame.render_widget(
         Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
         Rect {
@@ -333,9 +359,7 @@ fn draw_submit_button(
         },
     );
 
-    let underline_len = (text_width as usize + 2)
-        .clamp(MIN_UNDERLINE, MAX_UNDERLINE)
-        .min(area.width as usize);
+    let underline_len = (text_width as usize + 2).clamp(MIN_UNDERLINE, MAX_UNDERLINE);
     let ul_x = area.x + area.width.saturating_sub(underline_len as u16) / 2;
     frame.render_widget(
         Paragraph::new("─".repeat(underline_len)).style(underline_style),
