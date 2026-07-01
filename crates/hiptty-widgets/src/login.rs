@@ -10,14 +10,14 @@ use ratatui::{
 
 use crate::logo::draw_login_logo;
 
-/// Total width of the centered login form (logo + fields block).
-const FORM_WIDTH: u16 = 52;
-const LABEL_WIDTH: u16 = 10;
+/// Width shared by logo and field rows so both align to the same center axis.
+const FORM_WIDTH: u16 = 42;
+const LABEL_WIDTH: u16 = 12;
+const GAP_WIDTH: u16 = 2;
 const MIN_UNDERLINE: usize = 15;
 const MAX_UNDERLINE: usize = 30;
 const DEFAULT_UNDERLINE: usize = 15;
-/// Fixed width of label + gap + input column so field rows center as a block.
-const ROW_BLOCK_WIDTH: u16 = LABEL_WIDTH + 1 + MAX_UNDERLINE as u16;
+const ROW_BLOCK_WIDTH: u16 = LABEL_WIDTH + GAP_WIDTH + MAX_UNDERLINE as u16;
 const INPUT_COL_WIDTH: u16 = MAX_UNDERLINE as u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ struct InputRowProps<'a> {
 }
 
 pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) {
-    let form_height = 18u16;
+    let form_height = 17u16;
     let form_x = area.x + area.width.saturating_sub(FORM_WIDTH) / 2;
     let form_y = area.y + area.height.saturating_sub(form_height) / 2;
     let form = Rect {
@@ -67,7 +67,7 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
@@ -161,7 +161,6 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
     );
 }
 
-/// Horizontally center the label+input row block within `area`.
 fn centered_row_block(area: Rect) -> Rect {
     let width = ROW_BLOCK_WIDTH.min(area.width);
     Rect {
@@ -169,6 +168,53 @@ fn centered_row_block(area: Rect) -> Rect {
         y: area.y,
         width,
         height: area.height,
+    }
+}
+
+fn row_layout(block: Rect) -> (Rect, Rect, Rect) {
+    let label_area = Rect {
+        x: block.x,
+        y: block.y,
+        width: LABEL_WIDTH,
+        height: 1,
+    };
+    let input_area = Rect {
+        x: block.x + LABEL_WIDTH + GAP_WIDTH,
+        y: block.y,
+        width: INPUT_COL_WIDTH.min(block.width.saturating_sub(LABEL_WIDTH + GAP_WIDTH)),
+        height: 1,
+    };
+    let underline_area = Rect {
+        x: input_area.x,
+        y: block.y + 1,
+        width: input_area.width,
+        height: 1,
+    };
+    (label_area, input_area, underline_area)
+}
+
+fn underline_width(display: &str, empty_input: bool) -> u16 {
+    let w = if empty_input {
+        DEFAULT_UNDERLINE
+    } else {
+        let content = str_width(display);
+        if content == 0 {
+            DEFAULT_UNDERLINE
+        } else {
+            content
+        }
+    };
+    w.clamp(MIN_UNDERLINE, MAX_UNDERLINE) as u16
+}
+
+fn centered_underline_rect(input_area: Rect, ul_w: u16) -> Rect {
+    let col = input_area.width;
+    let x = input_area.x + col.saturating_sub(ul_w) / 2;
+    Rect {
+        x,
+        y: input_area.y + 1,
+        width: ul_w,
+        height: 1,
     }
 }
 
@@ -184,8 +230,7 @@ fn draw_text_input(
         return;
     }
 
-    let [text_row, underline_row] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(block);
+    let (label_area, input_area, _) = row_layout(block);
 
     let display = if row.value.is_empty() && !row.placeholder.is_empty() {
         row.placeholder.to_string()
@@ -211,47 +256,34 @@ fn draw_text_input(
         palette.dim_style()
     };
 
-    let label_area = Rect {
-        x: text_row.x,
-        y: text_row.y,
-        width: LABEL_WIDTH,
-        height: 1,
-    };
-    let input_area = Rect {
-        x: text_row.x + LABEL_WIDTH + 1,
-        y: text_row.y,
-        width: INPUT_COL_WIDTH.min(text_row.width.saturating_sub(LABEL_WIDTH + 1)),
-        height: 1,
-    };
-
     let empty_input = row.value.is_empty() && row.placeholder.is_empty();
     let ul_w = underline_width(&display, empty_input);
-
-    frame.render_widget(Paragraph::new(row.label).style(label_style), label_area);
-    frame.render_widget(Paragraph::new(display).style(value_style), input_area);
-    frame.render_widget(
-        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
+    let ul_rect = centered_underline_rect(
         Rect {
             x: input_area.x,
-            y: underline_row.y,
-            width: ul_w,
-            height: 1,
+            y: block.y,
+            width: input_area.width,
+            height: 2,
         },
+        ul_w,
     );
-}
 
-fn underline_width(display: &str, empty_input: bool) -> u16 {
-    let w = if empty_input {
-        DEFAULT_UNDERLINE
-    } else {
-        let content = str_width(display);
-        if content == 0 {
-            DEFAULT_UNDERLINE
-        } else {
-            content
-        }
-    };
-    w.clamp(MIN_UNDERLINE, MAX_UNDERLINE) as u16
+    frame.render_widget(
+        Paragraph::new(row.label)
+            .style(label_style)
+            .alignment(Alignment::Right),
+        label_area,
+    );
+    frame.render_widget(
+        Paragraph::new(display)
+            .style(value_style)
+            .alignment(Alignment::Center),
+        input_area,
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
+        ul_rect,
+    );
 }
 
 fn draw_security_picker(
@@ -268,8 +300,7 @@ fn draw_security_picker(
         return;
     }
 
-    let [text_row, underline_row] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(block);
+    let (label_area, input_area, _) = row_layout(block);
 
     let arrow_style = if focused {
         palette.accent_style()
@@ -287,39 +318,38 @@ fn draw_security_picker(
         palette.dim_style()
     };
 
-    let label_area = Rect {
-        x: text_row.x,
-        y: text_row.y,
-        width: LABEL_WIDTH,
-        height: 1,
-    };
-    let input_area = Rect {
-        x: text_row.x + LABEL_WIDTH + 1,
-        y: text_row.y,
-        width: INPUT_COL_WIDTH.min(text_row.width.saturating_sub(LABEL_WIDTH + 1)),
-        height: 1,
-    };
-
-    frame.render_widget(Paragraph::new(label).style(label_style), label_area);
-
-    let q_trunc = truncate_str(question, INPUT_COL_WIDTH as usize);
+    let q_trunc = truncate_str(question, INPUT_COL_WIDTH.saturating_sub(4) as usize);
     let picker_text = format!("◂ {q_trunc} ▸");
     let line = Line::from(vec![
         Span::styled("◂ ", arrow_style),
         Span::styled(q_trunc, text_style),
         Span::styled(" ▸", arrow_style),
     ]);
-    frame.render_widget(Paragraph::new(line), input_area);
 
     let ul_w = underline_width(&picker_text, false);
-    frame.render_widget(
-        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
+    let ul_rect = centered_underline_rect(
         Rect {
             x: input_area.x,
-            y: underline_row.y,
-            width: ul_w,
-            height: 1,
+            y: block.y,
+            width: input_area.width,
+            height: 2,
         },
+        ul_w,
+    );
+
+    frame.render_widget(
+        Paragraph::new(label)
+            .style(label_style)
+            .alignment(Alignment::Right),
+        label_area,
+    );
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        input_area,
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
+        ul_rect,
     );
 }
 
@@ -330,44 +360,17 @@ fn draw_submit_button(
     loading: bool,
     palette: Palette,
 ) {
-    if area.height < 2 {
-        return;
-    }
-
     let label = if loading { "登录中…" } else { "登  录" };
     let style = if focused {
         palette.accent_style().add_modifier(Modifier::BOLD)
     } else {
         palette.primary_style()
     };
-    let underline_style = if focused {
-        palette.accent_style()
-    } else {
-        palette.dim_style()
-    };
-
-    let text_width = str_width(label) as u16;
-    let btn_x = area.x + area.width.saturating_sub(text_width) / 2;
 
     frame.render_widget(
-        Paragraph::new(label).style(style),
-        Rect {
-            x: btn_x,
-            y: area.y,
-            width: text_width.max(1),
-            height: 1,
-        },
-    );
-
-    let underline_len = (text_width as usize + 2).clamp(MIN_UNDERLINE, MAX_UNDERLINE);
-    let ul_x = area.x + area.width.saturating_sub(underline_len as u16) / 2;
-    frame.render_widget(
-        Paragraph::new("─".repeat(underline_len)).style(underline_style),
-        Rect {
-            x: ul_x,
-            y: area.y + 1,
-            width: underline_len as u16,
-            height: 1,
-        },
+        Paragraph::new(label)
+            .style(style)
+            .alignment(Alignment::Center),
+        area,
     );
 }
