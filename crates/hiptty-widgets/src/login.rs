@@ -10,8 +10,7 @@ use ratatui::{
 
 use crate::logo::draw_login_logo;
 
-/// Width shared by logo and field rows so both align to the same center axis.
-const FORM_WIDTH: u16 = 42;
+const FORM_WIDTH: u16 = 44;
 const LABEL_WIDTH: u16 = 12;
 const GAP_WIDTH: u16 = 2;
 const MIN_UNDERLINE: usize = 15;
@@ -43,7 +42,6 @@ pub struct LoginFormProps<'a> {
 struct InputRowProps<'a> {
     label: &'a str,
     value: &'a str,
-    placeholder: &'a str,
     focused: bool,
     disabled: bool,
 }
@@ -84,7 +82,6 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
         InputRowProps {
             label: "用户名",
             value: props.username,
-            placeholder: "",
             focused: props.focused == LoginField::Username,
             disabled: false,
         },
@@ -97,7 +94,6 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
         InputRowProps {
             label: "密码",
             value: &"*".repeat(props.password.chars().count()),
-            placeholder: "",
             focused: props.focused == LoginField::Password,
             disabled: false,
         },
@@ -128,7 +124,6 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
             } else {
                 ""
             },
-            placeholder: if answer_active { "" } else { "—" },
             focused: props.focused == LoginField::SecurityAnswer && answer_active,
             disabled: !answer_active,
         },
@@ -171,7 +166,7 @@ fn centered_row_block(area: Rect) -> Rect {
     }
 }
 
-fn row_layout(block: Rect) -> (Rect, Rect, Rect) {
+fn row_columns(block: Rect) -> (Rect, Rect) {
     let label_area = Rect {
         x: block.x,
         y: block.y,
@@ -184,13 +179,7 @@ fn row_layout(block: Rect) -> (Rect, Rect, Rect) {
         width: INPUT_COL_WIDTH.min(block.width.saturating_sub(LABEL_WIDTH + GAP_WIDTH)),
         height: 1,
     };
-    let underline_area = Rect {
-        x: input_area.x,
-        y: block.y + 1,
-        width: input_area.width,
-        height: 1,
-    };
-    (label_area, input_area, underline_area)
+    (label_area, input_area)
 }
 
 fn underline_width(display: &str, empty_input: bool) -> u16 {
@@ -207,17 +196,6 @@ fn underline_width(display: &str, empty_input: bool) -> u16 {
     w.clamp(MIN_UNDERLINE, MAX_UNDERLINE) as u16
 }
 
-fn centered_underline_rect(input_area: Rect, ul_w: u16) -> Rect {
-    let col = input_area.width;
-    let x = input_area.x + col.saturating_sub(ul_w) / 2;
-    Rect {
-        x,
-        y: input_area.y + 1,
-        width: ul_w,
-        height: 1,
-    }
-}
-
 fn draw_text_input(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -230,20 +208,13 @@ fn draw_text_input(
         return;
     }
 
-    let (label_area, input_area, _) = row_layout(block);
-
-    let display = if row.value.is_empty() && !row.placeholder.is_empty() {
-        row.placeholder.to_string()
-    } else {
-        truncate_str(row.value, INPUT_COL_WIDTH as usize)
-    };
+    let (label_area, input_area) = row_columns(block);
+    let display = truncate_str(row.value, INPUT_COL_WIDTH as usize);
 
     let value_style = if row.disabled {
         palette.dim_style()
     } else if row.focused {
         palette.accent_style().add_modifier(Modifier::BOLD)
-    } else if row.value.is_empty() && !row.placeholder.is_empty() {
-        palette.dim_style()
     } else {
         palette.primary_style()
     };
@@ -256,17 +227,8 @@ fn draw_text_input(
         palette.dim_style()
     };
 
-    let empty_input = row.value.is_empty() && row.placeholder.is_empty();
+    let empty_input = row.value.is_empty();
     let ul_w = underline_width(&display, empty_input);
-    let ul_rect = centered_underline_rect(
-        Rect {
-            x: input_area.x,
-            y: block.y,
-            width: input_area.width,
-            height: 2,
-        },
-        ul_w,
-    );
 
     frame.render_widget(
         Paragraph::new(row.label)
@@ -274,15 +236,15 @@ fn draw_text_input(
             .alignment(Alignment::Right),
         label_area,
     );
-    frame.render_widget(
-        Paragraph::new(display)
-            .style(value_style)
-            .alignment(Alignment::Center),
-        input_area,
-    );
+    frame.render_widget(Paragraph::new(display).style(value_style), input_area);
     frame.render_widget(
         Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
-        ul_rect,
+        Rect {
+            x: input_area.x,
+            y: block.y + 1,
+            width: ul_w,
+            height: 1,
+        },
     );
 }
 
@@ -300,7 +262,7 @@ fn draw_security_picker(
         return;
     }
 
-    let (label_area, input_area, _) = row_layout(block);
+    let (label_area, input_area) = row_columns(block);
 
     let arrow_style = if focused {
         palette.accent_style()
@@ -327,15 +289,6 @@ fn draw_security_picker(
     ]);
 
     let ul_w = underline_width(&picker_text, false);
-    let ul_rect = centered_underline_rect(
-        Rect {
-            x: input_area.x,
-            y: block.y,
-            width: input_area.width,
-            height: 2,
-        },
-        ul_w,
-    );
 
     frame.render_widget(
         Paragraph::new(label)
@@ -343,13 +296,15 @@ fn draw_security_picker(
             .alignment(Alignment::Right),
         label_area,
     );
-    frame.render_widget(
-        Paragraph::new(line).alignment(Alignment::Center),
-        input_area,
-    );
+    frame.render_widget(Paragraph::new(line), input_area);
     frame.render_widget(
         Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
-        ul_rect,
+        Rect {
+            x: input_area.x,
+            y: block.y + 1,
+            width: ul_w,
+            height: 1,
+        },
     );
 }
 
