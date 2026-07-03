@@ -1,5 +1,8 @@
 use hiptty_core::ThreadSummary;
-use hiptty_render::{display_title, format_count, truncate_str, Palette};
+use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS};
+use hiptty_render::{
+    display_title, format_count, format_relative_time, str_width, truncate_str, Palette,
+};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Modifier,
@@ -7,9 +10,10 @@ use ratatui::{
     Frame,
 };
 
-const AVATAR_W: u16 = 5;
-const ICONS_W: u16 = 12;
-const ITEM_HEIGHT: u16 = 3;
+pub const ITEM_HEIGHT: u16 = 3;
+const SELECTOR_W: u16 = 1;
+const AVATAR_W: u16 = AVATAR_COLS;
+const COUNT_GAP: &str = "   ";
 
 pub struct ThreadListProps<'a> {
     pub palette: Palette,
@@ -18,14 +22,35 @@ pub struct ThreadListProps<'a> {
     pub scroll: usize,
     pub show_avatar: bool,
     pub loading: bool,
+    pub images: Option<&'a mut ImageCache>,
 }
 
-pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, props: ThreadListProps<'_>) {
+pub fn thread_list_capacity(content_height: u16) -> usize {
+    if content_height < ITEM_HEIGHT {
+        return 0;
+    }
+    (content_height / ITEM_HEIGHT) as usize
+}
+
+pub fn ensure_thread_scroll(selected: usize, scroll: usize, capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    if selected < scroll {
+        selected
+    } else if selected >= scroll.saturating_add(capacity) {
+        selected.saturating_sub(capacity.saturating_sub(1))
+    } else {
+        scroll
+    }
+}
+
+pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, mut props: ThreadListProps<'_>) {
     if area.height < ITEM_HEIGHT {
         return;
     }
 
-    let capacity = area.height / ITEM_HEIGHT;
+    let capacity = thread_list_capacity(area.height);
     let start = props.scroll;
     let mut y = area.y;
 
@@ -34,7 +59,7 @@ pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, props: ThreadListProp
         .iter()
         .enumerate()
         .skip(start)
-        .take(capacity as usize)
+        .take(capacity)
     {
         let item_h = ITEM_HEIGHT.min(area.y + area.height - y);
         if item_h < 2 {
@@ -53,6 +78,7 @@ pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, props: ThreadListProp
             idx == props.selected,
             props.palette,
             props.show_avatar,
+            &mut props.images,
         );
         y += ITEM_HEIGHT;
     }
@@ -65,37 +91,78 @@ fn draw_thread_item(
     selected: bool,
     palette: Palette,
     show_avatar: bool,
+    images: &mut Option<&mut ImageCache>,
 ) {
     let content_h = 2u16.min(area.height);
-    let body = Rect {
+    let selector_area = Rect {
         x: area.x,
         y: area.y,
-        width: area.width,
+        width: SELECTOR_W,
+        height: content_h,
+    };
+    draw_selector(frame, selector_area, selected, palette);
+
+    let body = Rect {
+        x: area.x + SELECTOR_W,
+        y: area.y,
+        width: area.width.saturating_sub(SELECTOR_W),
         height: content_h,
     };
 
-    let (avatar_area, right_area) = if show_avatar {
-        let cols =
-            Layout::horizontal([Constraint::Length(AVATAR_W), Constraint::Min(0)]).split(body);
-        (Some(cols[0]), cols[1])
-    } else {
-        (None, body)
-    };
+    let cols = Layout::horizontal([
+        Constraint::Length(if show_avatar { AVATAR_W } else { 0 }),
+        Constraint::Min(0),
+    ])
+    .split(body);
 
-    if let Some(av) = avatar_area {
-        draw_avatar_placeholder(frame, av, thread.author.as_deref(), palette);
+    if show_avatar {
+        if let Some(cache) = images.as_deref() {
+            let (avatar, placeholder) =
+                cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
+            draw_avatar_entry(frame, cols[0], avatar, placeholder, palette, 0);
+        }
     }
 
+    let right_area = cols[1];
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(right_area);
 
-    let icons = build_icons(thread);
-    let icons_w = ICONS_W.min(rows[0].width);
-    let title_cols =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(icons_w)]).split(rows[0]);
+    draw_title_row(frame, rows[0], thread, selected, palette);
+    draw_meta_row(frame, rows[1], thread, selected, palette);
+}
 
-    let title = display_title(&thread.title);
-    let title_budget = title_cols[0].width.saturating_sub(1) as usize;
-    let title_trunc = truncate_str(&title, title_budget);
+fn draw_selector(frame: &mut Frame<'_>, area: Rect, selected: bool, palette: Palette) {
+    if !selected || area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let lines: Vec<String> = std::iter::repeat_n("█".to_string(), area.height as usize).collect();
+    frame.render_widget(
+        Paragraph::new(lines.join("\n")).style(palette.accent_style()),
+        area,
+    );
+}
+
+fn draw_title_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    thread: &ThreadSummary,
+    selected: bool,
+    palette: Palette,
+) {
+    let counts = build_counts(thread);
+    let counts_w = if counts.is_empty() {
+        0
+    } else {
+        str_width(&counts).min(area.width as usize) as u16 + 1
+    };
+
+    let cols = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(counts_w.min(area.width)),
+    ])
+    .split(area);
+
+    let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize);
 
     let title_style = if selected {
         palette.selected_style()
@@ -104,62 +171,106 @@ fn draw_thread_item(
     };
 
     frame.render_widget(
-        Paragraph::new(title_trunc).style(title_style),
-        title_cols[0],
+        Paragraph::new(title_line).style(title_style),
+        cols[0],
     );
-    frame.render_widget(
-        Paragraph::new(icons)
+
+    if !counts.is_empty() && cols[1].width > 0 {
+        frame.render_widget(
+            Paragraph::new(truncate_str(
+                &counts,
+                cols[1].width.saturating_sub(1) as usize,
+            ))
             .style(palette.secondary_style())
             .alignment(Alignment::Right),
-        title_cols[1],
-    );
+            cols[1],
+        );
+    }
+}
+
+fn draw_meta_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    thread: &ThreadSummary,
+    selected: bool,
+    palette: Palette,
+) {
+    let author = build_author_line(thread);
+    let time = build_time_line(thread);
 
     let meta_style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)
     } else {
         palette.secondary_style()
     };
-    frame.render_widget(
-        Paragraph::new(build_meta_line(thread, rows[1].width as usize)).style(meta_style),
-        rows[1],
-    );
-}
 
-fn draw_avatar_placeholder(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    author: Option<&str>,
-    palette: Palette,
-) {
-    if area.height < 2 || area.width < 3 {
+    if time.is_empty() {
+        frame.render_widget(
+            Paragraph::new(truncate_str(
+                &author,
+                area.width.saturating_sub(1) as usize,
+            ))
+            .style(meta_style),
+            area,
+        );
         return;
     }
 
-    let initial = author
-        .and_then(|a| a.chars().next())
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    let time_w = str_width(&time);
+    let total = area.width as usize;
 
-    let top = Rect {
+    if time_w >= total {
+        frame.render_widget(
+            Paragraph::new(truncate_str(&time, total.saturating_sub(1)))
+                .style(meta_style)
+                .alignment(Alignment::Right),
+            area,
+        );
+        return;
+    }
+
+    let left_w = total.saturating_sub(time_w) as u16;
+    let left_area = Rect {
         x: area.x,
         y: area.y,
-        width: area.width.min(4),
-        height: 1,
+        width: left_w,
+        height: area.height,
     };
-    let mid = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width.min(4),
-        height: 1,
+    let right_area = Rect {
+        x: area.x + left_w,
+        y: area.y,
+        width: time_w as u16,
+        height: area.height,
     };
 
-    frame.render_widget(Paragraph::new("┌──┐").style(palette.dim_style()), top);
-    let inner = truncate_str(&initial, 2);
-    let padded = format!("│{inner:>2}│");
-    frame.render_widget(Paragraph::new(padded).style(palette.dim_style()), mid);
+    frame.render_widget(
+        Paragraph::new(truncate_str(&author, left_w.saturating_sub(1) as usize)).style(meta_style),
+        left_area,
+    );
+    frame.render_widget(
+        Paragraph::new(time).style(meta_style).alignment(Alignment::Right),
+        right_area,
+    );
 }
 
-fn build_icons(thread: &ThreadSummary) -> String {
+fn build_title_with_icons(thread: &ThreadSummary, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let title = display_title(&thread.title);
+    let icons = build_status_icons(thread);
+    if icons.is_empty() {
+        return truncate_str(&title, max_cols);
+    }
+
+    let icon_suffix = format!(" {icons}");
+    let icon_w = str_width(&icon_suffix);
+    let title_budget = max_cols.saturating_sub(icon_w);
+    format!("{}{}", truncate_str(&title, title_budget), icon_suffix)
+}
+
+fn build_status_icons(thread: &ThreadSummary) -> String {
     let mut parts = Vec::new();
     if thread.sticky {
         parts.push("\u{f08d}");
@@ -170,51 +281,58 @@ fn build_icons(thread: &ThreadSummary) -> String {
     if thread.is_poll {
         parts.push("\u{f681}");
     }
-    if thread.is_new {
-        parts.push("NEW");
-    }
     parts.join(" ")
 }
 
-fn build_meta_line(thread: &ThreadSummary, max_cols: usize) -> String {
+fn build_author_line(thread: &ThreadSummary) -> String {
     let author = thread.author.as_deref().unwrap_or("?");
-    let thread_type = thread
+    thread
         .thread_type
         .as_deref()
         .filter(|t| !t.is_empty())
-        .map(|t| format!(" · {t}"))
-        .unwrap_or_default();
+        .map(|t| format!("{author} · {t}"))
+        .unwrap_or_else(|| author.to_string())
+}
 
-    let mut meta = String::new();
+fn build_counts(thread: &ThreadSummary) -> String {
+    let mut parts = Vec::new();
     if let Some(replies) = format_count(thread.reply_count.as_deref()) {
-        meta.push_str(&format!(" \u{f27a}{replies}"));
+        parts.push(format!("\u{f27a} {replies}"));
     }
     if let Some(views) = format_count(thread.view_count.as_deref()) {
-        meta.push_str(&format!(" \u{f06e}{views}"));
+        parts.push(format!("\u{f06e} {views}"));
     }
+    parts.join(COUNT_GAP)
+}
 
-    let time = thread
+fn build_time_line(thread: &ThreadSummary) -> String {
+    let raw_time = thread
         .time_update
         .as_deref()
         .or(thread.time_create.as_deref())
         .unwrap_or("");
+    let time = format_relative_time(raw_time);
     let last = thread
         .last_post
         .as_deref()
         .filter(|s| !s.is_empty())
         .map(|s| format!(" · {s}"))
         .unwrap_or_default();
-
-    let raw = if meta.is_empty() {
-        format!("{author}{thread_type}  {time}{last}")
+    if time.is_empty() && last.is_empty() {
+        String::new()
     } else {
-        format!("{author}{thread_type}{meta}  {time}{last}")
-    };
-
-    truncate_str(&raw, max_cols.saturating_sub(1))
+        format!("{time}{last}")
+    }
 }
 
-pub fn draw_loading_indicator(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
+const LOADING_FRAMES: [&str; 4] = [
+    "── 正在加载 ──",
+    "── 正在加载. ──",
+    "── 正在加载.. ──",
+    "── 正在加载... ──",
+];
+
+pub fn draw_loading_indicator(frame: &mut Frame<'_>, area: Rect, palette: Palette, tick: u64) {
     if area.height == 0 {
         return;
     }
@@ -224,8 +342,9 @@ pub fn draw_loading_indicator(frame: &mut Frame<'_>, area: Rect, palette: Palett
         width: area.width,
         height: 1,
     };
+    let frame_idx = ((tick / 3) as usize) % LOADING_FRAMES.len();
     frame.render_widget(
-        Paragraph::new("── 正在加载... ──")
+        Paragraph::new(LOADING_FRAMES[frame_idx])
             .style(palette.dim_style())
             .alignment(Alignment::Center),
         indicator_area,
@@ -237,28 +356,80 @@ mod tests {
     use super::*;
     use hiptty_render::str_width;
 
-    #[test]
-    fn meta_truncates_to_width() {
-        let thread = ThreadSummary {
+    fn sample_thread() -> ThreadSummary {
+        ThreadSummary {
             tid: "1".into(),
             title: "t".into(),
             title_color: None,
             author: Some("admin".into()),
             author_id: None,
             avatar_url: None,
-            last_post: None,
+            last_post: Some("techfan".into()),
             reply_count: Some("99".into()),
             view_count: Some("1000".into()),
-            time_create: Some("today".into()),
-            time_update: None,
-            thread_type: None,
-            sticky: false,
-            with_pic: false,
-            is_new: false,
+            time_create: Some("2008-11-28".into()),
+            time_update: Some("2026-7-1 12:00".into()),
+            thread_type: Some("公告".into()),
+            sticky: true,
+            with_pic: true,
+            is_new: true,
             is_poll: false,
             max_page: 1,
-        };
-        let line = build_meta_line(&thread, 20);
-        assert!(str_width(&line) <= 20);
+        }
+    }
+
+    #[test]
+    fn new_marker_omitted() {
+        let thread = sample_thread();
+        assert!(!build_status_icons(&thread).contains("NEW"));
+        let title = build_title_with_icons(&thread, 80);
+        assert!(!title.contains("NEW"));
+    }
+
+    #[test]
+    fn status_icons_follow_title() {
+        let thread = sample_thread();
+        let title = build_title_with_icons(&thread, 80);
+        assert!(title.contains('\u{f08d}'));
+        assert!(title.contains('\u{f03e}'));
+        let title_end = title.find('\u{f08d}').unwrap();
+        assert!(title_end > 0);
+    }
+
+    #[test]
+    fn counts_have_spacing() {
+        let thread = sample_thread();
+        let counts = build_counts(&thread);
+        assert!(counts.contains("\u{f27a} 99"));
+        assert!(counts.contains(COUNT_GAP));
+        assert!(counts.contains("\u{f06e} 1000"));
+    }
+
+    #[test]
+    fn meta_time_uses_relative_format() {
+        let thread = sample_thread();
+        let time = build_time_line(&thread);
+        assert!(time.contains(" · techfan"));
+        assert!(!time.contains("2026-7-1"));
+        let relative = time.split(" · ").next().unwrap_or("");
+        assert!(relative.contains('前') || relative == "刚刚");
+    }
+
+    #[test]
+    fn meta_parts_respect_width() {
+        let thread = sample_thread();
+        let author = build_author_line(&thread);
+        let counts = build_counts(&thread);
+        assert!(str_width(&author) <= 20);
+        assert!(str_width(&counts) <= 30);
+    }
+
+    #[test]
+    fn scroll_follows_selection() {
+        assert_eq!(ensure_thread_scroll(0, 0, 5), 0);
+        assert_eq!(ensure_thread_scroll(4, 0, 5), 0);
+        assert_eq!(ensure_thread_scroll(5, 0, 5), 1);
+        assert_eq!(ensure_thread_scroll(9, 1, 5), 5);
+        assert_eq!(ensure_thread_scroll(3, 5, 5), 3);
     }
 }

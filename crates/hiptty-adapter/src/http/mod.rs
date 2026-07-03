@@ -56,6 +56,24 @@ impl HttpClient {
             .and_then(Self::check_status)
     }
 
+    pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AdapterError> {
+        let response = self
+            .inner
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AdapterError::Network(e.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(AdapterError::NotFound(url.to_string()));
+        }
+        let response = Self::check_status(response)?;
+        response
+            .bytes()
+            .await
+            .map_err(|e| AdapterError::Network(e.to_string()))
+            .map(|b| b.to_vec())
+    }
+
     pub async fn post_form(
         &self,
         url: &str,

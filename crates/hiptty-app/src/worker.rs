@@ -1,5 +1,8 @@
 use hiptty_adapter::ForumClient;
-use hiptty_core::{AdapterResult, Credentials, SessionInfo, ThreadList, SECURITY_QUESTIONS};
+use hiptty_core::{
+    AdapterResult, Credentials, SessionInfo, ThreadDetail, ThreadList, SECURITY_QUESTIONS,
+};
+use hiptty_image::ImageKind;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -15,6 +18,14 @@ pub enum WorkerRequest {
     LoadThreads {
         fid: u32,
         page: u32,
+    },
+    LoadThreadDetail {
+        tid: String,
+        page: u32,
+    },
+    FetchImage {
+        url: String,
+        kind: ImageKind,
     },
 }
 
@@ -39,6 +50,16 @@ pub enum WorkerResponse {
         fid: u32,
         page: u32,
         result: AdapterResult<ThreadList>,
+    },
+    ThreadDetailLoaded {
+        tid: String,
+        page: u32,
+        result: AdapterResult<ThreadDetail>,
+    },
+    ImageFetched {
+        url: String,
+        kind: ImageKind,
+        result: AdapterResult<Vec<u8>>,
     },
 }
 
@@ -99,6 +120,14 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                 WorkerRequest::LoadThreads { fid, page } => {
                     let result = client.forum_threads(fid, page).await;
                     let _ = tx.send(WorkerResponse::ThreadsLoaded { fid, page, result });
+                }
+                WorkerRequest::LoadThreadDetail { tid, page } => {
+                    let result = client.thread_detail(&tid, page).await;
+                    let _ = tx.send(WorkerResponse::ThreadDetailLoaded { tid, page, result });
+                }
+                WorkerRequest::FetchImage { url, kind } => {
+                    let result = client.fetch_url(&url).await;
+                    let _ = tx.send(WorkerResponse::ImageFetched { url, kind, result });
                 }
             }
         }

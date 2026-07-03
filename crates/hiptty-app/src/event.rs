@@ -3,7 +3,9 @@ use hiptty_core::{AdapterError, ErrorCode};
 use hiptty_widgets::LoginField;
 use tokio::sync::mpsc;
 
-use crate::app::{App, FeedState, Overlay, Page};
+use hiptty_image::thread_avatar_job;
+
+use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -14,9 +16,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSende
     match app.overlay {
         Overlay::ForumPicker => handle_forum_picker_key(app, key, worker_tx),
         Overlay::None => match app.page {
+            Page::Startup => handle_startup_key(app, key),
             Page::Login => handle_login_key(app, key, worker_tx),
             Page::ThreadFeed => handle_feed_key(app, key, worker_tx),
+            Page::ThreadDetail => handle_detail_key(app, key, worker_tx),
         },
+    }
+}
+
+fn handle_startup_key(app: &mut App, key: KeyEvent) {
+    if matches!(key.code, KeyCode::Esc) {
+        app.quit = true;
     }
 }
 
@@ -168,11 +178,15 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
         KeyCode::Char('j') | KeyCode::Down => {
             if app.feed.selected + 1 < app.feed.threads.len() {
                 app.feed.selected += 1;
+                app.sync_feed_scroll();
                 maybe_load_more(app, worker_tx);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.feed.selected = app.feed.selected.saturating_sub(1);
+            if app.feed.selected > 0 {
+                app.feed.selected -= 1;
+                app.sync_feed_scroll();
+            }
         }
         KeyCode::Char('f') => {
             app.overlay = Overlay::ForumPicker;
@@ -188,9 +202,215 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('G') if !app.feed.threads.is_empty() => {
             app.feed.selected = app.feed.threads.len() - 1;
+            app.sync_feed_scroll();
+            maybe_load_more(app, worker_tx);
+        }
+        KeyCode::Enter => {
+            let selected = app.feed.selected;
+            if let Some(thread) = app.feed.threads.get(selected).cloned() {
+                open_thread_detail(app, &thread, worker_tx);
+            }
         }
         _ => {}
     }
+}
+
+fn handle_detail_key(
+    app: &mut App,
+    key: KeyEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('b') => {
+            app.page = Page::ThreadFeed;
+            app.detail.loading = false;
+            app.detail.loading_more = false;
+            app.detail.pending_fetch = None;
+            app.detail.error = None;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
+                let palette = app.palette();
+                let viewport = app.main_content_height();
+                let (selected, scroll_top) = {
+                    let images = app.images();
+                    hiptty_widgets::detail_step_down(
+                        app.detail.selected,
+                        app.detail.scroll_top,
+                        posts,
+                        app.viewport_width,
+                        viewport,
+                        palette,
+                        images,
+                    )
+                };
+                app.detail.selected = selected;
+                app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
+                    scroll_top,
+                    posts,
+                    app.viewport_width,
+                    viewport,
+                    palette,
+                    app.images(),
+                );
+                maybe_load_more_detail(app, worker_tx);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
+                let palette = app.palette();
+                let viewport = app.main_content_height();
+                let (selected, scroll_top) = {
+                    let images = app.images();
+                    hiptty_widgets::detail_step_up(
+                        app.detail.selected,
+                        app.detail.scroll_top,
+                        posts,
+                        app.viewport_width,
+                        viewport,
+                        palette,
+                        images,
+                    )
+                };
+                app.detail.selected = selected;
+                app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
+                    scroll_top,
+                    posts,
+                    app.viewport_width,
+                    viewport,
+                    palette,
+                    app.images(),
+                );
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
+                let palette = app.palette();
+                let viewport = app.main_content_height();
+                app.detail.scroll_top = {
+                    let images = app.images();
+                    hiptty_widgets::page_scroll_top(
+                        app.detail.scroll_top,
+                        1,
+                        posts,
+                        app.viewport_width,
+                        viewport,
+                        palette,
+                        images,
+                    )
+                };
+                app.detail.selected = hiptty_widgets::first_visible_floor(
+                    app.detail.scroll_top,
+                    posts,
+                    app.viewport_width,
+                    palette,
+                    app.images(),
+                );
+                maybe_load_more_detail(app, worker_tx);
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
+                let palette = app.palette();
+                let viewport = app.main_content_height();
+                app.detail.scroll_top = {
+                    let images = app.images();
+                    hiptty_widgets::page_scroll_top(
+                        app.detail.scroll_top,
+                        -1,
+                        posts,
+                        app.viewport_width,
+                        viewport,
+                        palette,
+                        images,
+                    )
+                };
+                app.detail.selected = hiptty_widgets::first_visible_floor(
+                    app.detail.scroll_top,
+                    posts,
+                    app.viewport_width,
+                    palette,
+                    app.images(),
+                );
+            }
+        }
+        KeyCode::Char('g') => {
+            request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+        }
+        KeyCode::Char('G') => {
+            if let Some(last) = app.detail.detail.as_ref().map(|d| d.last_page) {
+                if last > 0 {
+                    request_thread_detail(app, worker_tx, last, DetailFetchMode::Replace);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn open_thread_detail(
+    app: &mut App,
+    thread: &hiptty_core::ThreadSummary,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    app.detail = DetailState::from_summary(thread, app.feed.fid);
+    app.page = Page::ThreadDetail;
+    request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+}
+
+fn request_thread_detail(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    page: u32,
+    mode: DetailFetchMode,
+) {
+    if app.detail.tid.is_empty() {
+        return;
+    }
+    if mode == DetailFetchMode::Replace {
+        if page == 1 {
+            app.detail.selected = 0;
+            app.detail.scroll_top = 0;
+        }
+        app.detail.loading = true;
+        app.detail.loading_more = false;
+    } else {
+        app.detail.loading_more = true;
+    }
+    app.detail.pending_fetch = Some(mode);
+    app.detail.error = None;
+    let _ = worker_tx.send(WorkerRequest::LoadThreadDetail {
+        tid: app.detail.tid.clone(),
+        page,
+    });
+}
+
+fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.detail.loading || app.detail.loading_more {
+        return;
+    }
+    let Some(detail) = app.detail.detail.as_ref() else {
+        return;
+    };
+    if detail.page >= detail.last_page || detail.posts.is_empty() {
+        return;
+    }
+    let viewport = app.main_content_height();
+    let palette = app.palette();
+    let images = app.images();
+    let last_visible = hiptty_widgets::last_visible_floor(
+        app.detail.scroll_top,
+        &detail.posts,
+        app.viewport_width,
+        viewport,
+        palette,
+        images,
+    );
+    let remaining_floors = detail.posts.len().saturating_sub(last_visible + 1);
+    if remaining_floors > 2 {
+        return;
+    }
+    request_thread_detail(app, worker_tx, detail.page + 1, DetailFetchMode::Append);
 }
 
 fn maybe_load_more(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -231,6 +451,7 @@ pub fn handle_worker_response(
                     request_threads(app, worker_tx, 1);
                 } else if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
                     app.prefill_login(&creds);
+                    app.login.loading = true;
                     let _ = worker_tx.send(WorkerRequest::AutoLogin(StoredCreds {
                         username: creds.username,
                         password_md5: creds.password_md5,
@@ -257,6 +478,7 @@ pub fn handle_worker_response(
                 } else {
                     app.session.logged_in = true;
                     app.session.username = Some(username);
+                    app.login.loading = false;
                     app.page = Page::ThreadFeed;
                     request_threads(app, worker_tx, 1);
                 }
@@ -271,6 +493,56 @@ pub fn handle_worker_response(
                 }
             }
         },
+        WorkerResponse::ThreadDetailLoaded { tid, page: _, result } => {
+            if app.detail.tid != tid {
+                return;
+            }
+            let mode = app.detail.pending_fetch.take().unwrap_or(DetailFetchMode::Replace);
+            app.detail.loading = false;
+            app.detail.loading_more = false;
+            match result {
+                Ok(incoming) => {
+                    app.detail.title = incoming.title.clone();
+                    if let Some(fid) = incoming.fid {
+                        app.detail.fid = Some(fid);
+                    }
+                    let appended_posts = match mode {
+                        DetailFetchMode::Append => {
+                            if let Some(existing) = app.detail.detail.as_mut() {
+                                let new_posts = incoming.posts.clone();
+                                existing.posts.extend(new_posts.clone());
+                                existing.page = incoming.page;
+                                existing.last_page = incoming.last_page;
+                                new_posts
+                            } else {
+                                app.detail.detail = Some(incoming);
+                                Vec::new()
+                            }
+                        }
+                        DetailFetchMode::Replace => {
+                            let all_posts = incoming.posts.clone();
+                            app.detail.detail = Some(incoming);
+                            all_posts
+                        }
+                    };
+                    app.detail.error = None;
+                    if mode == DetailFetchMode::Append && !appended_posts.is_empty() {
+                        prefetch_detail_posts(app, &appended_posts, worker_tx);
+                    } else {
+                        prefetch_detail_images(app, worker_tx);
+                    }
+                    app.sync_detail_scroll();
+                }
+                Err(err) => {
+                    if is_auth_required(&err) {
+                        try_auto_relogin(app, worker_tx);
+                    } else {
+                        app.detail.error = Some(error_message(&err));
+                        app.toast = Some(error_message(&err));
+                    }
+                }
+            }
+        }
         WorkerResponse::ThreadsLoaded { fid, page, result } => {
             if app.feed.fid != fid {
                 return;
@@ -286,6 +558,8 @@ pub fn handle_worker_response(
                     app.feed.page = list.page;
                     app.feed.max_page = list.max_page;
                     app.feed.error = None;
+                    prefetch_feed_avatars(app, worker_tx);
+                    app.sync_feed_scroll();
                 }
                 Err(err) => {
                     if is_auth_required(&err) {
@@ -297,7 +571,73 @@ pub fn handle_worker_response(
                 }
             }
         }
+        WorkerResponse::ImageFetched { url, kind, result } => {
+            let outcome = match result {
+                Ok(bytes) => hiptty_image::FetchOutcome::Ok(bytes),
+                Err(err) if err.code() == hiptty_core::ErrorCode::NotFound => {
+                    hiptty_image::FetchOutcome::NotFound
+                }
+                Err(_) => hiptty_image::FetchOutcome::Failed,
+            };
+            if let Some(cache) = app.images_mut() {
+                cache.apply_fetch(url, kind, outcome);
+            }
+            if app.page == crate::app::Page::ThreadDetail {
+                app.sync_detail_scroll();
+            }
+        }
     }
+}
+
+fn prefetch_detail_images(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let posts: Vec<_> = app
+        .detail
+        .detail
+        .as_ref()
+        .map(|detail| detail.posts.clone())
+        .unwrap_or_default();
+    prefetch_detail_posts(app, &posts, worker_tx);
+}
+
+fn prefetch_detail_posts(
+    app: &mut App,
+    posts: &[hiptty_core::Post],
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let width = app.viewport_width.saturating_sub(1);
+    let mut jobs = Vec::new();
+    if let Some(cache) = app.images_mut() {
+        for post in posts {
+            jobs.extend(hiptty_image::prefetch_post(cache, post, width));
+        }
+    }
+    app.dispatch_image_fetches(jobs, worker_tx);
+}
+
+fn prefetch_feed_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let jobs: Vec<_> = app
+        .feed
+        .threads
+        .iter()
+        .filter_map(thread_avatar_job)
+        .collect();
+    enqueue_image_jobs(app, jobs, worker_tx);
+}
+
+fn enqueue_image_jobs(
+    app: &mut App,
+    jobs: Vec<hiptty_image::FetchRequest>,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let mut pending = Vec::new();
+    if let Some(cache) = app.images_mut() {
+        for job in jobs {
+            if cache.request(job.url.clone(), job.kind) {
+                pending.push(job);
+            }
+        }
+    }
+    app.dispatch_image_fetches(pending, worker_tx);
 }
 
 fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {

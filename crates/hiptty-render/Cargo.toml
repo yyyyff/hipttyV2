@@ -9,3 +9,4 @@ description = "Theme and text helpers for hiptty TUI"
 hiptty-core = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }
+chrono = { workspace = true }

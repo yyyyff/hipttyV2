@@ -154,4 +154,8 @@ impl ForumClient for StubForumClient {
     ) -> AdapterResult<crate::fixture::FixtureDump> {
         Err(Self::not_impl("dump_fixture"))
     }
+
+    async fn fetch_url(&self, _url: &str) -> AdapterResult<Vec<u8>> {
+        Err(Self::not_impl("fetch_url"))
+    }
 }

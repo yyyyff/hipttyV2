@@ -379,7 +379,20 @@ fn parse_smiley(
     Some((src, code, smilie_id))
 }
 
-fn parse_block_image(element: ElementRef<'_>, urls: &ForumUrls) -> Option<ContentNode> {
+fn extract_quoted_arg(s: &str) -> Option<String> {
+    let open = s.find(['\'', '"'])?;
+    let quote = s.as_bytes()[open] as char;
+    let rest = &s[open + 1..];
+    let end = rest.find(quote)?;
+    let inner = rest[..end].trim();
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_string())
+    }
+}
+
+pub(crate) fn parse_block_image(element: ElementRef<'_>, urls: &ForumUrls) -> Option<ContentNode> {
     let src = element.value().attr("src").unwrap_or_default();
     let id = element.value().attr("id").unwrap_or_default();
     let src = absolute_url(urls, src);
@@ -391,11 +404,22 @@ fn parse_block_image(element: ElementRef<'_>, urls: &ForumUrls) -> Option<Conten
             .attr("file")
             .map(|f| absolute_url(urls, f))
             .unwrap_or_default();
-        let mut full_url = if onclick.contains("attachment") {
-            let part = extract_param(onclick, "attachment", "'");
-            absolute_url(urls, &format!("attachment{part}"))
-        } else {
+        let mut full_url = if !file.is_empty() {
             file
+        } else if onclick.starts_with("zoom") {
+            extract_quoted_arg(onclick)
+                .map(|target| absolute_url(urls, &target))
+                .unwrap_or_default()
+        } else if onclick.contains("attachment.php") {
+            let part = extract_param(onclick, "attachment.php", "'");
+            let part = if part.is_empty() {
+                extract_param(onclick, "attachment.php", "\"")
+            } else {
+                part
+            };
+            absolute_url(urls, &format!("attachment.php{part}"))
+        } else {
+            String::new()
         };
         let thumb_url = if src.contains("thumb.") {
             Some(src.clone())
@@ -523,5 +547,33 @@ mod tests {
             parse_smilie_code("https://img02.4d4y.com/forum/images/smilies/default/biggrin.gif"),
             Some("default_biggrin".into())
         );
+    }
+
+    #[test]
+    fn zoom_lazy_load_urls() {
+        let urls = ForumUrls::default_4d4y();
+        let cases = [
+            (
+                r#"<img onclick="zoom(this, 'https://img02.4d4y.com/forum/attachments/day_260630/2606302322368df5cc713ab026.jpeg')" src="https://img02.4d4y.com/forum/attachments/day_260630/2606302322368df5cc713ab026.jpeg.thumb.jpg" id="aimg_6121113" />"#,
+                "https://img02.4d4y.com/forum/attachments/day_260630/2606302322368df5cc713ab026.jpeg",
+                "https://img02.4d4y.com/forum/attachments/day_260630/2606302322368df5cc713ab026.jpeg.thumb.jpg",
+            ),
+            (
+                r#"<img onclick="zoom(this, 'https://img02.4d4y.com/forum/attachments/day_260630/2606302332236bbab3e809e92b.jpg')" src="https://img02.4d4y.com/forum/attachments/day_260630/2606302332236bbab3e809e92b.jpg.thumb.jpg" id="aimg_6121115" />"#,
+                "https://img02.4d4y.com/forum/attachments/day_260630/2606302332236bbab3e809e92b.jpg",
+                "https://img02.4d4y.com/forum/attachments/day_260630/2606302332236bbab3e809e92b.jpg.thumb.jpg",
+            ),
+        ];
+        for (html, want_url, want_thumb) in cases {
+            let doc = Html::parse_document(html);
+            let img = doc.select(&Selector::parse("img").unwrap()).next().unwrap();
+            let node = parse_block_image(img, &urls).expect("image node");
+            if let ContentNode::Image { url, thumb_url, .. } = node {
+                assert_eq!(url, want_url);
+                assert_eq!(thumb_url.as_deref(), Some(want_thumb));
+            } else {
+                panic!("expected Image node");
+            }
+        }
     }
 }

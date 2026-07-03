@@ -67,4 +67,7 @@ pub trait ForumClient: Send + Sync {
         url: &str,
         output: Option<&Path>,
     ) -> AdapterResult<crate::fixture::FixtureDump>;
+
+    /// Fetch raw bytes (e.g. avatars, smilies, inline images). Uses session cookies.
+    async fn fetch_url(&self, url: &str) -> AdapterResult<Vec<u8>>;
 }

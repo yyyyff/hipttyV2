@@ -7,6 +7,7 @@ description = "Reusable ratatui widgets for hiptty TUI"
 
 [dependencies]
 hiptty-core = { workspace = true }
+hiptty-image = { workspace = true }
 hiptty-render = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }

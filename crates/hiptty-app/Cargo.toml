@@ -8,8 +8,10 @@ description = "Application state and event loop for hiptty TUI"
 [dependencies]
 hiptty-adapter = { workspace = true }
 hiptty-core = { workspace = true }
+hiptty-image = { workspace = true }
 hiptty-render = { workspace = true }
 hiptty-widgets = { workspace = true }
+ratatui-image = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true }

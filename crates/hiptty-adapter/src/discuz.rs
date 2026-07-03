@@ -221,4 +221,8 @@ impl ForumClient for DiscuzClient {
     async fn dump_fixture(&self, url: &str, output: Option<&Path>) -> AdapterResult<FixtureDump> {
         fixture::dump_fixture(&self.http, &self.urls.base, url, output).await
     }
+
+    async fn fetch_url(&self, url: &str) -> AdapterResult<Vec<u8>> {
+        self.http.get_bytes(url).await
+    }
 }

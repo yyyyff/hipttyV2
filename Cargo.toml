@@ -5,6 +5,7 @@ members = [
     "crates/hiptty-adapter",
     "crates/hiptty-cli",
     "crates/hiptty-render",
+    "crates/hiptty-image",
     "crates/hiptty-widgets",
     "crates/hiptty-app",
     "crates/hiptty",
@@ -34,9 +35,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 hiptty-core = { path = "crates/hiptty-core" }
 hiptty-adapter = { path = "crates/hiptty-adapter" }
 hiptty-render = { path = "crates/hiptty-render" }
+hiptty-image = { path = "crates/hiptty-image" }
 hiptty-widgets = { path = "crates/hiptty-widgets" }
 hiptty-app = { path = "crates/hiptty-app" }
 ratatui = "0.30"
+ratatui-image = { version = "11", default-features = false, features = ["image-defaults", "crossterm"] }
 crossterm = "0.28"
 unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 color-eyre = "0.6"
+rust-embed = "8"

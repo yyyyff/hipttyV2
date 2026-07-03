@@ -308,6 +308,37 @@ fn draw_security_picker(
     );
 }
 
+pub struct StartupProps<'a> {
+    pub palette: Palette,
+    pub message: &'a str,
+}
+
+pub fn draw_startup(frame: &mut Frame<'_>, area: Rect, props: StartupProps<'_>) {
+    let block_h = 5u16;
+    let block_y = area.y + area.height.saturating_sub(block_h) / 2;
+    let block = Rect {
+        x: area.x,
+        y: block_y,
+        width: area.width,
+        height: block_h.min(area.height),
+    };
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(block);
+
+    draw_login_logo(frame, chunks[0], props.palette);
+    frame.render_widget(
+        Paragraph::new(props.message)
+            .style(props.palette.secondary_style())
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
 fn draw_submit_button(
     frame: &mut Frame<'_>,
     area: Rect,

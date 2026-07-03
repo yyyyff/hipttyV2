@@ -3,8 +3,10 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use hiptty_adapter::ForumClient;
+use hiptty_render::clear_terminal_graphics;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 
 use crate::app::App;
@@ -17,6 +19,9 @@ pub async fn run<C: ForumClient + Send + Sync + 'static>(
     client: C,
 ) -> io::Result<()> {
     let mut terminal = setup_terminal()?;
+    // Terminal image protocol is probed exactly once here (Picker::clone() reuses it).
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    app.init_images(picker);
     let result = run_loop(&mut terminal, &mut app, client).await;
     teardown_terminal(&mut terminal)?;
     result
@@ -47,7 +52,12 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, key, &worker_tx);
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => {
+                    app.sync_feed_scroll();
+                    if app.page == crate::app::Page::ThreadDetail {
+                        app.sync_detail_scroll();
+                    }
+                }
                 _ => {}
             }
         }
@@ -70,12 +80,14 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    clear_terminal_graphics()?;
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
         io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
+    clear_terminal_graphics()?;
     let backend = CrosstermBackend::new(io::stdout());
     Terminal::new(backend)
 }

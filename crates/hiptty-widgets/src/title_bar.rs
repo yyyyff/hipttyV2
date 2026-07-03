@@ -1,4 +1,4 @@
-use hiptty_render::{truncate_str, Palette};
+use hiptty_render::{str_width, truncate_str, Palette};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     widgets::Paragraph,
@@ -50,7 +50,15 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
         );
     }
 
-    let row2_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(18)]).split(row2);
+    let right_w = props
+        .breadcrumb_right
+        .map(|t| str_width(t).min(row2.width as usize) as u16 + 1)
+        .unwrap_or(0);
+    let row2_cols = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(right_w.min(row2.width)),
+    ])
+    .split(row2);
     let breadcrumb = truncate_str(
         props.breadcrumb,
         row2_cols[0].width.saturating_sub(1) as usize,
@@ -62,9 +70,12 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
 
     if let Some(right_text) = props.breadcrumb_right {
         frame.render_widget(
-            Paragraph::new(right_text)
-                .style(props.palette.secondary_style())
-                .alignment(Alignment::Right),
+            Paragraph::new(truncate_str(
+                right_text,
+                row2_cols[1].width.saturating_sub(1) as usize,
+            ))
+            .style(props.palette.secondary_style())
+            .alignment(Alignment::Right),
             row2_cols[1],
         );
     }

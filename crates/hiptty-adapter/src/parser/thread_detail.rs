@@ -3,7 +3,8 @@ use scraper::{ElementRef, Html, Selector};
 
 use crate::http::urls::ForumUrls;
 use crate::parser::common::{extract_param, parse_int, parse_size_text};
-use crate::parser::content::parse_content;
+use crate::parser::content::{parse_block_image, parse_content};
+use hiptty_core::ContentNode;
 
 pub fn parse(html: &str, tid: &str, urls: &ForumUrls) -> Result<ThreadDetail, AdapterError> {
     let document = Html::parse_document(html);
@@ -79,19 +80,24 @@ fn parse_nav(document: &Html) -> Result<(String, Option<u32>), AdapterError> {
                 }
             }
         }
-        let mut nav_text = nav.text().collect::<String>();
-        nav_text = nav_text.replace('»', "").trim().to_string();
-        if !nav_text.is_empty() {
-            title = nav_text;
-        }
+    }
+
+    if let Some(h1) = document
+        .select(&Selector::parse("div#threadtitle h1").unwrap())
+        .next()
+    {
+        title = h1.text().collect::<String>().trim().to_string();
     }
 
     if title.is_empty() {
-        if let Some(title_el) = document
-            .select(&Selector::parse("div#threadtitle").unwrap())
-            .next()
-        {
-            title = title_el.text().collect::<String>().trim().to_string();
+        if let Some(nav) = document.select(&nav_sel).next() {
+            let mut nav_text = nav.text().collect::<String>();
+            nav_text = nav_text.replace('»', ">").trim().to_string();
+            if let Some((_prefix, last)) = nav_text.rsplit_once('>') {
+                title = last.trim().to_string();
+            } else if !nav_text.is_empty() {
+                title = nav_text;
+            }
         }
     }
 
@@ -316,13 +322,15 @@ fn append_attachments(
             .next()
             .and_then(|em| parse_size_text(&em.text().collect::<String>()));
         if let Some(img) = dl.select(&Selector::parse("img").unwrap()).next() {
-            let src = img.value().attr("src").unwrap_or_default();
-            let url = if src.contains("://") {
-                src.to_string()
-            } else {
-                format!("{}{}", urls.base, src.trim_start_matches('/'))
+            let Some(ContentNode::Image { url, .. }) = parse_block_image(img, urls) else {
+                continue;
             };
-            content.push(hiptty_core::ContentNode::Image {
+            if content.iter().any(|existing| {
+                matches!(existing, ContentNode::Image { url: existing_url, .. } if existing_url == &url)
+            }) {
+                continue;
+            }
+            content.push(ContentNode::Image {
                 url,
                 thumb_url: None,
                 size,
@@ -395,5 +403,68 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn thread_3455616_floor_images() {
+        let path = "/tmp/thread_3455616_p1.html";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).expect("read thread fixture");
+        let urls = ForumUrls::default_4d4y();
+        let detail = parse(&html, "3455616", &urls).expect("parse thread detail");
+        for floor in [7u32, 10] {
+            let post = detail
+                .posts
+                .iter()
+                .find(|p| p.floor == floor)
+                .unwrap_or_else(|| panic!("missing floor {floor}"));
+            let imgs: Vec<_> = post
+                .content
+                .iter()
+                .filter_map(|n| match n {
+                    hiptty_core::ContentNode::Image { url, thumb_url, .. } => {
+                        Some((url.as_str(), thumb_url.as_deref()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!imgs.is_empty(), "floor {floor} should have inline images: {:?}", post.content);
+            for (url, thumb) in &imgs {
+                assert!(
+                    url.contains("img02.4d4y.com"),
+                    "floor {floor} full url should stay on CDN: {url}"
+                );
+                if let Some(t) = thumb {
+                    assert!(t.contains("img02.4d4y.com"), "floor {floor} thumb: {t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_images_use_file_url_not_placeholder() {
+        let html = include_str!("../../tests/fixtures/thread_detail_448060_p1.html");
+        let urls = ForumUrls::default_4d4y();
+        let detail = parse(html, "448060", &urls).expect("parse thread detail");
+        let first = &detail.posts[0];
+        let img_urls: Vec<&str> = first
+            .content
+            .iter()
+            .filter_map(|node| match node {
+                hiptty_core::ContentNode::Image { url, .. } => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!img_urls.is_empty(), "expected attachment images on first floor");
+        assert!(
+            img_urls.iter().any(|url| url.contains(".jpg")),
+            "expected jpg attachment urls, got {img_urls:?}"
+        );
+        assert!(
+            !img_urls.iter().any(|url| url.contains("none.gif")),
+            "must not fetch placeholder gif, got {img_urls:?}"
+        );
     }
 }
