@@ -8,6 +8,25 @@ use ratatui::{
 
 use crate::terminal::clear_terminal_placements_in_area;
 
+/// Delete Kitty placements and reset cells in `area` (text buffer unchanged).
+pub fn clear_graphics_in_area(frame: &mut Frame<'_>, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let _ = clear_terminal_placements_in_area(area);
+    clear_rect(frame, area);
+}
+
+/// Clear text buffer and Kitty placements in `area` before drawing scrollable content.
+pub fn clear_content_viewport(frame: &mut Frame<'_>, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let _ = clear_terminal_placements_in_area(area);
+    clear_rect(frame, area);
+    fill_area_spaces(frame, area);
+}
+
 /// Paint every row in `area` with spaces so scrolled-out graphics rows are overwritten.
 ///
 /// Ratatui starts each frame with an empty buffer, but terminal graphics (Kitty) can outlive

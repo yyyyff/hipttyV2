@@ -42,32 +42,41 @@ pub fn draw_graphic_in_viewport(
     let pos_x = doc_x.saturating_sub(viewport.x) as i16;
 
     match entry.map(|e| &e.state) {
-        Some(ImageState::Ready { draw, .. }) => match draw {
-            ReadyDraw::Sliced(sliced) => {
-                // SlicedImage handles negative positions and clipping automatically
-                frame.render_widget(
-                    SlicedImage::new(sliced.as_ref(), SignedPosition::from((pos_x, pos_y as i16))),
-                    image_viewport,
-                );
+        Some(ImageState::Ready { draw, height, .. }) => {
+            let img_h = i32::from(*height);
+            if pos_y + img_h <= 0 {
+                return;
             }
-            ReadyDraw::Full(protocol) => {
-                if pos_y < 0 || pos_y >= image_viewport.height as i32 {
-                    return;
+            match draw {
+                ReadyDraw::Sliced(sliced) => {
+                    // SlicedImage clips within the full viewport; do not shrink the render area.
+                    frame.render_widget(
+                        SlicedImage::new(
+                            sliced.as_ref(),
+                            SignedPosition::from((pos_x, pos_y as i16)),
+                        ),
+                        image_viewport,
+                    );
                 }
-                let size = protocol.size();
-                let area = Rect {
-                    x: image_viewport.x.saturating_add(pos_x.max(0) as u16),
-                    y: image_viewport.y.saturating_add(pos_y as u16),
-                    width: size.width.min(image_viewport.width),
-                    height: size
-                        .height
-                        .min(image_viewport.height.saturating_sub(pos_y as u16)),
-                };
-                if area.width > 0 && area.height > 0 {
-                    frame.render_widget(Image::new(protocol), area);
+                ReadyDraw::Full(protocol) => {
+                    if pos_y < 0 || pos_y >= image_viewport.height as i32 {
+                        return;
+                    }
+                    let size = protocol.size();
+                    let area = Rect {
+                        x: image_viewport.x.saturating_add(pos_x.max(0) as u16),
+                        y: image_viewport.y.saturating_add(pos_y as u16),
+                        width: size.width.min(image_viewport.width),
+                        height: size
+                            .height
+                            .min(image_viewport.height.saturating_sub(pos_y as u16)),
+                    };
+                    if area.width > 0 && area.height > 0 {
+                        frame.render_widget(Image::new(protocol), area);
+                    }
                 }
             }
-        },
+        }
         Some(ImageState::Failed) => draw_fail_label(frame, viewport, fail_label, doc_x, doc_y, scroll_top, palette),
         _ => draw_loading_label(frame, viewport, doc_x, doc_y, scroll_top, palette),
     }
@@ -85,12 +94,18 @@ pub fn draw_image_entry(
         return;
     }
     match entry.map(|e| &e.state) {
-        Some(ImageState::Ready { draw, .. }) => match draw {
+        Some(ImageState::Ready { draw, height, .. }) => match draw {
             ReadyDraw::Sliced(sliced) => {
+                if slice_skip_rows >= *height {
+                    return;
+                }
                 let position = SignedPosition::from((0, -(slice_skip_rows as i16)));
                 frame.render_widget(SlicedImage::new(sliced.as_ref(), position), area);
             }
             ReadyDraw::Full(protocol) => {
+                if slice_skip_rows > 0 {
+                    return;
+                }
                 frame.render_widget(Image::new(protocol), area);
             }
         },

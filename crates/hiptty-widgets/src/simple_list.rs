@@ -1,6 +1,6 @@
 use hiptty_core::ListItem;
-use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS};
-use hiptty_render::{format_relative_time, str_width, truncate_str, Palette};
+use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS, AVATAR_ROWS};
+use hiptty_render::{clear_content_viewport, format_relative_time, str_width, truncate_str, Palette};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Modifier,
@@ -15,7 +15,7 @@ pub struct SimpleListProps<'a> {
     pub palette: Palette,
     pub items: &'a [ListItem],
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
     pub show_avatar: bool,
     pub images: Option<&'a mut ImageCache>,
 }
@@ -28,28 +28,39 @@ pub fn simple_list_capacity(content_height: u16) -> usize {
 }
 
 pub fn draw_simple_list(frame: &mut Frame<'_>, area: Rect, mut props: SimpleListProps<'_>) {
-    if area.height < SIMPLE_ITEM_HEIGHT {
+    if area.height == 0 || area.width == 0 {
         return;
     }
-    let capacity = simple_list_capacity(area.height);
-    let mut y = area.y;
-    for (idx, item) in props
-        .items
-        .iter()
-        .enumerate()
-        .skip(props.scroll)
-        .take(capacity)
-    {
-        let item_h = SIMPLE_ITEM_HEIGHT.min(area.y + area.height - y);
-        if item_h < 2 {
+    clear_content_viewport(frame, area);
+
+    let scroll = props.scroll_lines;
+    let viewport_bottom = scroll.saturating_add(area.height);
+
+    for (idx, item) in props.items.iter().enumerate() {
+        let item_top = (idx as u16).saturating_mul(SIMPLE_ITEM_HEIGHT);
+        let item_bottom = item_top.saturating_add(SIMPLE_ITEM_HEIGHT);
+        if item_bottom <= scroll {
+            continue;
+        }
+        if item_top >= viewport_bottom {
             break;
         }
+
+        let draw_y = area.y.saturating_add(item_top.saturating_sub(scroll));
+        let draw_h = item_bottom
+            .min(viewport_bottom)
+            .saturating_sub(item_top.max(scroll));
+        if draw_h == 0 {
+            continue;
+        }
+
         let item_area = Rect {
             x: area.x,
-            y,
+            y: draw_y,
             width: area.width,
-            height: item_h,
+            height: draw_h,
         };
+        let intra_skip = scroll.saturating_sub(item_top);
         draw_simple_item(
             frame,
             item_area,
@@ -57,9 +68,9 @@ pub fn draw_simple_list(frame: &mut Frame<'_>, area: Rect, mut props: SimpleList
             idx == props.selected,
             props.palette,
             props.show_avatar,
+            intra_skip,
             &mut props.images,
         );
-        y += SIMPLE_ITEM_HEIGHT;
     }
 }
 
@@ -70,13 +81,20 @@ fn draw_simple_item(
     selected: bool,
     palette: Palette,
     show_avatar: bool,
+    intra_skip: u16,
     images: &mut Option<&mut ImageCache>,
 ) {
+    const CONTENT_ROWS: u16 = 2;
+    let visible_rows = CONTENT_ROWS.saturating_sub(intra_skip).min(area.height);
+    if visible_rows == 0 {
+        return;
+    }
+
     let selector = Rect {
         x: area.x,
         y: area.y,
         width: 1,
-        height: 2.min(area.height),
+        height: visible_rows,
     };
     let bar = if selected { "│" } else { " " };
     frame.render_widget(
@@ -92,7 +110,7 @@ fn draw_simple_item(
         x: area.x + 1,
         y: area.y,
         width: area.width.saturating_sub(1),
-        height: 2.min(area.height),
+        height: visible_rows,
     };
     let cols = Layout::horizontal([
         Constraint::Length(if show_avatar { AVATAR_COLS } else { 0 }),
@@ -100,10 +118,21 @@ fn draw_simple_item(
     ])
     .split(body);
 
-    if show_avatar {
+    if show_avatar && intra_skip < AVATAR_ROWS {
         if let Some(cache) = images.as_deref() {
             let (avatar, placeholder) = cache.avatar_entries_for_draw(item.avatar_url.as_deref());
-            draw_avatar_entry(frame, cols[0], avatar, placeholder, palette, 0);
+            let avatar_area = Rect {
+                height: AVATAR_ROWS.saturating_sub(intra_skip).min(area.height),
+                ..cols[0]
+            };
+            draw_avatar_entry(
+                frame,
+                avatar_area,
+                avatar,
+                placeholder,
+                palette,
+                intra_skip,
+            );
         }
     }
 
@@ -132,12 +161,15 @@ fn draw_simple_item(
         palette.primary_style()
     };
 
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(line1, line1_style)),
-            Line::from(Span::styled(line2, palette.secondary_style())),
-        ]),
-        cols[1],
-    );
+    let mut lines = Vec::new();
+    if intra_skip == 0 && visible_rows >= 1 {
+        lines.push(Line::from(Span::styled(line1, line1_style)));
+    }
+    if intra_skip <= 1 && lines.len() < visible_rows as usize {
+        lines.push(Line::from(Span::styled(line2, palette.secondary_style())));
+    }
+    if !lines.is_empty() {
+        frame.render_widget(Paragraph::new(lines), cols[1]);
+    }
     let _ = str_width;
 }

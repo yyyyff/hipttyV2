@@ -4,8 +4,8 @@ use hiptty_image::{
     ImageKind, ImageState, AVATAR_COLS, IMAGE_FAIL_LABEL,
 };
 use hiptty_render::{
-    fill_area_spaces, floor_header_rows, format_signature, render_post_content_lines, str_width,
-    Palette,
+    clear_content_viewport, floor_header_rows, format_signature, render_post_content_lines,
+    str_width, Palette,
 };
 use ratatui::{
     layout::{Alignment, Rect},
@@ -285,7 +285,7 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
     if area.height == 0 || area.width < 8 || props.posts.is_empty() {
         return;
     }
-    fill_area_spaces(frame, area);
+    clear_content_viewport(frame, area);
     let viewport_bottom = props.scroll_top.saturating_add(area.height);
     let mut logical_top = 0u16;
 

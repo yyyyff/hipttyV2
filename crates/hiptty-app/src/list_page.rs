@@ -39,7 +39,7 @@ pub struct ListPageState {
     pub kind: Option<ListPageKind>,
     pub items: Vec<ListItem>,
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
     pub page: u32,
     pub max_page: u32,
     pub search_id: Option<String>,
@@ -53,7 +53,7 @@ impl ListPageState {
         self.kind = Some(kind);
         self.items.clear();
         self.selected = 0;
-        self.scroll = 0;
+        self.scroll_lines = 0;
         self.page = 0;
         self.max_page = 0;
         self.search_id = None;
@@ -75,7 +75,7 @@ pub struct PmThreadState {
     pub peer_name: String,
     pub messages: Vec<ListItem>,
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
     pub loading: bool,
     pub error: Option<String>,
 }
@@ -86,7 +86,7 @@ impl PmThreadState {
         self.peer_name = name;
         self.messages.clear();
         self.selected = 0;
-        self.scroll = 0;
+        self.scroll_lines = 0;
         self.loading = true;
         self.error = None;
     }

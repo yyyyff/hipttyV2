@@ -228,7 +228,7 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('g') => {
             app.feed.selected = 0;
-            app.feed.scroll = 0;
+            app.feed.scroll_lines = 0;
         }
         KeyCode::Char('G') if !app.feed.threads.is_empty() => {
             app.feed.selected = app.feed.threads.len() - 1;
@@ -267,14 +267,15 @@ fn handle_detail_key(
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
                 let palette = app.palette();
-                let viewport = app.main_content_height();
+                let viewport = app.scroll_viewport_height();
+                let width = app.content_width();
                 let (selected, scroll_top) = {
                     let images = app.images();
                     hiptty_widgets::detail_step_down(
                         app.detail.selected,
                         app.detail.scroll_top,
                         posts,
-                        app.viewport_width,
+                        width,
                         viewport,
                         palette,
                         images,
@@ -284,7 +285,7 @@ fn handle_detail_key(
                 app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
                     scroll_top,
                     posts,
-                    app.viewport_width,
+                    width,
                     viewport,
                     palette,
                     app.images(),
@@ -295,14 +296,15 @@ fn handle_detail_key(
         KeyCode::Char('k') | KeyCode::Up => {
             if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
                 let palette = app.palette();
-                let viewport = app.main_content_height();
+                let viewport = app.scroll_viewport_height();
+                let width = app.content_width();
                 let (selected, scroll_top) = {
                     let images = app.images();
                     hiptty_widgets::detail_step_up(
                         app.detail.selected,
                         app.detail.scroll_top,
                         posts,
-                        app.viewport_width,
+                        width,
                         viewport,
                         palette,
                         images,
@@ -312,7 +314,7 @@ fn handle_detail_key(
                 app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
                     scroll_top,
                     posts,
-                    app.viewport_width,
+                    width,
                     viewport,
                     palette,
                     app.images(),
@@ -322,14 +324,15 @@ fn handle_detail_key(
         KeyCode::PageDown => {
             if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
                 let palette = app.palette();
-                let viewport = app.main_content_height();
+                let viewport = app.scroll_viewport_height();
+                let width = app.content_width();
                 app.detail.scroll_top = {
                     let images = app.images();
                     hiptty_widgets::page_scroll_top(
                         app.detail.scroll_top,
                         1,
                         posts,
-                        app.viewport_width,
+                        width,
                         viewport,
                         palette,
                         images,
@@ -338,7 +341,7 @@ fn handle_detail_key(
                 app.detail.selected = hiptty_widgets::first_visible_floor(
                     app.detail.scroll_top,
                     posts,
-                    app.viewport_width,
+                    width,
                     palette,
                     app.images(),
                 );
@@ -348,14 +351,15 @@ fn handle_detail_key(
         KeyCode::PageUp => {
             if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
                 let palette = app.palette();
-                let viewport = app.main_content_height();
+                let viewport = app.scroll_viewport_height();
+                let width = app.content_width();
                 app.detail.scroll_top = {
                     let images = app.images();
                     hiptty_widgets::page_scroll_top(
                         app.detail.scroll_top,
                         -1,
                         posts,
-                        app.viewport_width,
+                        width,
                         viewport,
                         palette,
                         images,
@@ -364,7 +368,7 @@ fn handle_detail_key(
                 app.detail.selected = hiptty_widgets::first_visible_floor(
                     app.detail.scroll_top,
                     posts,
-                    app.viewport_width,
+                    width,
                     palette,
                     app.images(),
                 );
@@ -388,7 +392,7 @@ fn handle_detail_key(
     }
 }
 
-fn open_thread_detail(
+pub fn open_thread_detail(
     app: &mut App,
     thread: &hiptty_core::ThreadSummary,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
@@ -425,7 +429,7 @@ pub fn request_thread_detail(
     });
 }
 
-fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     if app.detail.loading || app.detail.loading_more {
         return;
     }
@@ -435,13 +439,13 @@ fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worke
     if detail.page >= detail.last_page || detail.posts.is_empty() {
         return;
     }
-    let viewport = app.main_content_height();
+    let viewport = app.scroll_viewport_height();
     let palette = app.palette();
     let images = app.images();
     let last_visible = hiptty_widgets::last_visible_floor(
         app.detail.scroll_top,
         &detail.posts,
-        app.viewport_width,
+        app.content_width(),
         viewport,
         palette,
         images,
@@ -467,7 +471,7 @@ fn request_threads(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
     if page == 1 {
         app.feed.threads.clear();
         app.feed.selected = 0;
-        app.feed.scroll = 0;
+        app.feed.scroll_lines = 0;
     }
     app.feed.loading = true;
     let _ = worker_tx.send(WorkerRequest::LoadThreads {
@@ -543,7 +547,13 @@ pub fn handle_worker_response(
             if app.detail.tid != tid {
                 return;
             }
-            let mode = app.detail.pending_fetch.take().unwrap_or(DetailFetchMode::Replace);
+            let mode = app.detail.pending_fetch.take().unwrap_or_else(|| {
+                if app.detail.loading_more {
+                    DetailFetchMode::Append
+                } else {
+                    DetailFetchMode::Replace
+                }
+            });
             app.detail.loading = false;
             app.detail.loading_more = false;
             match result {
@@ -577,7 +587,10 @@ pub fn handle_worker_response(
                     } else {
                         prefetch_detail_images(app, worker_tx);
                     }
-                    app.sync_detail_scroll();
+                    match mode {
+                        DetailFetchMode::Append => app.preserve_detail_scroll(),
+                        DetailFetchMode::Replace => app.sync_detail_scroll(),
+                    }
                 }
                 Err(err) => {
                     if is_auth_required(&err) {
@@ -740,7 +753,7 @@ pub fn handle_worker_response(
                 cache.apply_fetch(url, kind, outcome);
             }
             if app.page == crate::app::Page::ThreadDetail {
-                app.sync_detail_scroll();
+                app.preserve_detail_scroll();
             }
         }
         WorkerResponse::SimpleListLoaded { .. }

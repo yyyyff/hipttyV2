@@ -18,6 +18,76 @@ pub struct TitleBarProps<'a> {
     pub breadcrumb_right: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TitleBarHits {
+    pub notifications: Option<Rect>,
+    pub pm: Option<Rect>,
+}
+
+pub fn title_bar_hits(area: Rect, props: &TitleBarProps<'_>) -> TitleBarHits {
+    let [row1, _] = title_bar_rows(area);
+    if row1.width == 0 {
+        return TitleBarHits::default();
+    }
+
+    let has_user = props.username.is_some();
+    if !has_user && !props.has_notifications && !props.has_pm {
+        return TitleBarHits::default();
+    }
+
+    let mut right = String::new();
+    if let Some(user) = props.username {
+        right.push_str(user);
+    }
+    if props.has_notifications {
+        if !right.is_empty() {
+            right.push(' ');
+        }
+        right.push('\u{f0a2}');
+    }
+    if props.has_pm {
+        if !right.is_empty() {
+            right.push(' ');
+        }
+        right.push('\u{f0e0}');
+    }
+
+    let total_w = str_width(&right).min(row1.width as usize) as u16;
+    let mut x = row1.x.saturating_add(row1.width.saturating_sub(total_w));
+    let mut hits = TitleBarHits::default();
+
+    if let Some(user) = props.username {
+        x = x.saturating_add(str_width(user).min(row1.width as usize) as u16);
+        if props.has_notifications || props.has_pm {
+            x = x.saturating_add(1);
+        }
+    }
+
+    if props.has_notifications {
+        hits.notifications = Some(Rect {
+            x,
+            y: row1.y,
+            width: 1,
+            height: 1,
+        });
+        x = x.saturating_add(1);
+        if props.has_pm {
+            x = x.saturating_add(1);
+        }
+    }
+
+    if props.has_pm {
+        hits.pm = Some(Rect {
+            x,
+            y: row1.y,
+            width: 1,
+            height: 1,
+        });
+    }
+
+    hits
+}
+
 pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_>) {
     let [row1, row2] = title_bar_rows(area);
 

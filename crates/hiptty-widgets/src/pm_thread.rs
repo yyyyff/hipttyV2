@@ -1,5 +1,7 @@
 use hiptty_core::ListItem;
-use hiptty_render::{format_relative_time, str_width, truncate_str, Palette};
+use hiptty_render::{
+    clear_content_viewport, format_relative_time, str_width, truncate_str, Palette,
+};
 use ratatui::{
     layout::Rect,
     style::Modifier,
@@ -15,7 +17,7 @@ pub struct PmThreadProps<'a> {
     pub messages: &'a [ListItem],
     pub my_username: &'a str,
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
 }
 
 pub fn pm_thread_capacity(content_height: u16) -> usize {
@@ -26,28 +28,39 @@ pub fn pm_thread_capacity(content_height: u16) -> usize {
 }
 
 pub fn draw_pm_thread(frame: &mut Frame<'_>, area: Rect, props: PmThreadProps<'_>) {
-    if area.height < PM_ITEM_HEIGHT {
+    if area.height == 0 || area.width == 0 {
         return;
     }
-    let capacity = pm_thread_capacity(area.height);
-    let mut y = area.y;
-    for (idx, msg) in props
-        .messages
-        .iter()
-        .enumerate()
-        .skip(props.scroll)
-        .take(capacity)
-    {
-        let item_h = PM_ITEM_HEIGHT.min(area.y + area.height - y);
-        if item_h < 3 {
+    clear_content_viewport(frame, area);
+
+    let scroll = props.scroll_lines;
+    let viewport_bottom = scroll.saturating_add(area.height);
+
+    for (idx, msg) in props.messages.iter().enumerate() {
+        let item_top = (idx as u16).saturating_mul(PM_ITEM_HEIGHT);
+        let item_bottom = item_top.saturating_add(PM_ITEM_HEIGHT);
+        if item_bottom <= scroll {
+            continue;
+        }
+        if item_top >= viewport_bottom {
             break;
         }
+
+        let draw_y = area.y.saturating_add(item_top.saturating_sub(scroll));
+        let draw_h = item_bottom
+            .min(viewport_bottom)
+            .saturating_sub(item_top.max(scroll));
+        if draw_h == 0 {
+            continue;
+        }
+
         let item_area = Rect {
             x: area.x,
-            y,
+            y: draw_y,
             width: area.width,
-            height: item_h,
+            height: draw_h,
         };
+        let intra_skip = scroll.saturating_sub(item_top);
         draw_pm_message(
             frame,
             item_area,
@@ -55,8 +68,8 @@ pub fn draw_pm_thread(frame: &mut Frame<'_>, area: Rect, props: PmThreadProps<'_
             props.my_username,
             idx == props.selected,
             props.palette,
+            intra_skip,
         );
-        y += PM_ITEM_HEIGHT;
     }
 }
 
@@ -67,6 +80,7 @@ fn draw_pm_message(
     my_username: &str,
     selected: bool,
     palette: Palette,
+    intra_skip: u16,
 ) {
     let is_mine = msg.author.as_deref() == Some(my_username);
     let bar_style = if is_mine {
@@ -110,13 +124,16 @@ fn draw_pm_message(
     } else {
         palette.secondary_style()
     };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(header, header_style)),
-            Line::from(Span::styled(body_text, palette.primary_style())),
-        ]),
-        body,
-    );
+    let mut lines = Vec::new();
+    if intra_skip == 0 {
+        lines.push(Line::from(Span::styled(header, header_style)));
+    }
+    if intra_skip <= 1 {
+        lines.push(Line::from(Span::styled(body_text, palette.primary_style())));
+    }
+    if !lines.is_empty() {
+        frame.render_widget(Paragraph::new(lines), body);
+    }
     let _ = str_width;
 }
 

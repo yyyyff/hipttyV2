@@ -5,8 +5,9 @@ use hiptty_core::{
 use hiptty_render::{format_count, Palette};
 use hiptty_image::{AvatarDiskCache, FetchRequest, ImageCache};
 use hiptty_widgets::{
-    clamp_scroll_top, ensure_scroll_top, ensure_thread_scroll, forum_picker_entries,
-    thread_list_capacity, LoginField,
+    clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets,
+    forum_picker_entries, snap_scroll_to_item, thread_list_capacity, LoginField,
+    ScrollBarInteraction, ScrollChrome, TitleBarHits, SCROLLBAR_COLS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -15,6 +16,21 @@ use crate::composer::{ComposerState, ConfirmDeleteState};
 use crate::list_page::{ListPageState, PmThreadState};
 use crate::nav::NavStack;
 use crate::worker::WorkerRequest;
+
+#[derive(Debug, Clone, Copy)]
+pub struct MouseClickState {
+    pub at: std::time::Instant,
+    pub column: u16,
+    pub row: u16,
+    pub page: Page,
+}
+
+fn list_item_height(page: Page) -> u16 {
+    match page {
+        Page::PmList | Page::Notifications => hiptty_widgets::SIMPLE_ITEM_HEIGHT,
+        _ => hiptty_widgets::ITEM_HEIGHT,
+    }
+}
 
 /// How the next `ThreadDetailLoaded` response should merge into state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +112,7 @@ pub struct FeedState {
     pub fid: u32,
     pub threads: Vec<ThreadSummary>,
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
     pub page: u32,
     pub max_page: u32,
     pub loading: bool,
@@ -144,7 +160,7 @@ impl FeedState {
             fid,
             threads: Vec::new(),
             selected: 0,
-            scroll: 0,
+            scroll_lines: 0,
             page: 0,
             max_page: 0,
             loading: false,
@@ -184,6 +200,12 @@ pub struct App {
     pub settings_path: std::path::PathBuf,
     pub startup_done: bool,
     pub image_cache: Option<ImageCache>,
+    /// Updated each frame for mouse hit-testing and scrollbar interaction.
+    pub scroll_chrome: Option<ScrollChrome>,
+    pub scrollbar_interaction: ScrollBarInteraction,
+    pub title_bar_area: ratatui::layout::Rect,
+    pub title_bar_hits: TitleBarHits,
+    pub last_click: Option<MouseClickState>,
 }
 
 impl App {
@@ -238,6 +260,11 @@ impl App {
             settings_path,
             startup_done: false,
             image_cache: None,
+            scroll_chrome: None,
+            scrollbar_interaction: ScrollBarInteraction::new(),
+            title_bar_area: ratatui::layout::Rect::default(),
+            title_bar_hits: TitleBarHits::default(),
+            last_click: None,
         }
     }
 
@@ -353,20 +380,24 @@ impl App {
     }
 
     pub fn sync_list_scroll(&mut self) {
-        let capacity = thread_list_capacity(self.main_content_height());
-        self.list_page.scroll = ensure_thread_scroll(
+        let item_h = list_item_height(self.page);
+        let viewport = self.scroll_viewport_height();
+        self.list_page.scroll_lines = snap_scroll_to_item(
             self.list_page.selected,
-            self.list_page.scroll,
-            capacity,
+            self.list_page.scroll_lines,
+            viewport,
+            item_h,
         );
     }
 
     pub fn sync_pm_scroll(&mut self) {
-        let capacity = hiptty_widgets::pm_thread_capacity(self.main_content_height());
-        self.pm_thread.scroll = ensure_thread_scroll(
+        let item_h = hiptty_widgets::PM_ITEM_HEIGHT;
+        let viewport = self.scroll_viewport_height();
+        self.pm_thread.scroll_lines = snap_scroll_to_item(
             self.pm_thread.selected,
-            self.pm_thread.scroll,
-            capacity,
+            self.pm_thread.scroll_lines,
+            viewport,
+            item_h,
         );
     }
 
@@ -388,8 +419,60 @@ impl App {
     }
 
     pub fn sync_feed_scroll(&mut self) {
-        let capacity = self.feed_list_capacity();
-        self.feed.scroll = ensure_thread_scroll(self.feed.selected, self.feed.scroll, capacity);
+        let item_h = hiptty_widgets::ITEM_HEIGHT;
+        let viewport = self.scroll_viewport_height();
+        self.feed.scroll_lines = snap_scroll_to_item(
+            self.feed.selected,
+            self.feed.scroll_lines,
+            viewport,
+            item_h,
+        );
+    }
+
+    /// Keep the top visible floor anchored after layout changes (append, image measure).
+    pub fn preserve_detail_scroll(&mut self) {
+        let Some(detail) = &self.detail.detail else {
+            return;
+        };
+        if detail.posts.is_empty() {
+            return;
+        }
+        let viewport = self.scroll_viewport_height();
+        let width = self.content_width();
+        let palette = self.palette();
+        let images = self.images();
+        let anchor = first_visible_floor(
+            self.detail.scroll_top,
+            &detail.posts,
+            width,
+            palette,
+            images,
+        );
+        let offsets = floor_offsets(&detail.posts, width, palette, images);
+        let anchored = offsets.get(anchor).copied().unwrap_or(0);
+        self.detail.scroll_top = clamp_scroll_top(
+            anchored,
+            &detail.posts,
+            width,
+            viewport,
+            palette,
+            images,
+        );
+    }
+
+    /// Content width below title/status, reserving the scrollbar column when possible.
+    pub fn content_width(&self) -> u16 {
+        if self.viewport_width > SCROLLBAR_COLS {
+            self.viewport_width.saturating_sub(SCROLLBAR_COLS)
+        } else {
+            self.viewport_width
+        }
+    }
+
+    pub fn scroll_viewport_height(&self) -> u16 {
+        self.scroll_chrome
+            .map(|c| c.viewport_len)
+            .unwrap_or_else(|| self.main_content_height())
     }
 
     pub fn detail_breadcrumb(&self) -> String {
@@ -424,7 +507,8 @@ impl App {
         if detail.posts.is_empty() {
             return;
         }
-        let viewport = self.main_content_height();
+        let viewport = self.scroll_viewport_height();
+        let width = self.content_width();
         let palette = self.palette();
         let images = self.images();
         self.detail.scroll_top = clamp_scroll_top(
@@ -432,13 +516,13 @@ impl App {
                 self.detail.selected,
                 self.detail.scroll_top,
                 &detail.posts,
-                self.viewport_width,
+                width,
                 viewport,
                 palette,
                 images,
             ),
             &detail.posts,
-            self.viewport_width,
+            width,
             viewport,
             palette,
             images,

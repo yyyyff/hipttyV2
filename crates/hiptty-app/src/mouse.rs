@@ -1,0 +1,322 @@
+use std::time::{Duration, Instant};
+
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use hiptty_widgets::{
+    apply_scroll_delta, clamp_scroll_top, clamp_thread_scroll_lines, item_index_at_row,
+    list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows, SIMPLE_ITEM_HEIGHT,
+    WHEEL_LINES, ITEM_HEIGHT, PM_ITEM_HEIGHT,
+};
+use ratatui::layout::Rect;
+use tokio::sync::mpsc;
+
+use crate::app::{App, MouseClickState, Overlay, Page};
+use crate::event::{maybe_load_more_detail, open_thread_detail};
+use crate::handlers::{maybe_load_more_list, open_list_selection};
+use crate::list_page::ListPageKind;
+use crate::nav::navigate_to;
+use crate::worker::WorkerRequest;
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
+
+pub fn handle_mouse(app: &mut App, event: MouseEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.overlay != Overlay::None && app.overlay != Overlay::ForumPicker {
+        return;
+    }
+
+    if let Some(action) = title_bar_action(app, event) {
+        apply_title_action(app, action, worker_tx);
+        return;
+    }
+
+    if let Some(offset) = scrollbar_action(app, event, current_scroll_offset(app)) {
+        apply_scroll_offset(app, offset, worker_tx);
+        return;
+    }
+
+    if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        handle_content_click(app, event.row, event.column, worker_tx);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TitleAction {
+    Notifications,
+    PmList,
+}
+
+fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
+    if !point_in(event.column, event.row, app.title_bar_area) {
+        return None;
+    }
+    if let Some(r) = app.title_bar_hits.notifications {
+        if point_in(event.column, event.row, r) {
+            return Some(TitleAction::Notifications);
+        }
+    }
+    if let Some(r) = app.title_bar_hits.pm {
+        if point_in(event.column, event.row, r) {
+            return Some(TitleAction::PmList);
+        }
+    }
+    None
+}
+
+fn apply_title_action(
+    app: &mut App,
+    action: TitleAction,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    use crate::handlers::request_list_page;
+    match action {
+        TitleAction::Notifications => {
+            navigate_to(app, Page::Notifications);
+            request_list_page(app, worker_tx, ListPageKind::Notifications, 1);
+        }
+        TitleAction::PmList => {
+            navigate_to(app, Page::PmList);
+            request_list_page(app, worker_tx, ListPageKind::PmList, 1);
+        }
+    }
+}
+
+fn current_scroll_offset(app: &App) -> u16 {
+    match app.page {
+        Page::ThreadFeed => app.feed.scroll_lines,
+        Page::ThreadDetail => app.detail.scroll_top,
+        Page::PmList | Page::Notifications | Page::Search | Page::MyThreads
+        | Page::MyReplies | Page::Favorites => app.list_page.scroll_lines,
+        Page::PmThread => app.pm_thread.scroll_lines,
+        _ => 0,
+    }
+}
+
+fn scrollbar_action(app: &mut App, event: MouseEvent, current_offset: u16) -> Option<u16> {
+    let chrome = app.scroll_chrome?;
+
+    match event.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            return wheel_over_content(event, chrome, current_offset);
+        }
+        MouseEventKind::Down(MouseButton::Left)
+        | MouseEventKind::Drag(MouseButton::Left)
+        | MouseEventKind::Up(MouseButton::Left) => {
+            if !chrome.shown || !point_in(event.column, event.row, chrome.bar) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+
+    if !chrome.shown {
+        return None;
+    }
+
+    let scrollbar = ScrollBar::vertical(chrome.lengths())
+        .arrows(ScrollBarArrows::None)
+        .offset(current_offset as usize)
+        .scroll_step(1);
+
+    scrollbar
+        .handle_mouse_event(chrome.bar, event, &mut app.scrollbar_interaction)
+        .map(|cmd| chrome.apply_command(cmd))
+}
+
+fn wheel_over_content(
+    event: MouseEvent,
+    chrome: hiptty_widgets::ScrollChrome,
+    current_offset: u16,
+) -> Option<u16> {
+    let delta = match event.kind {
+        MouseEventKind::ScrollUp => -WHEEL_LINES,
+        MouseEventKind::ScrollDown => WHEEL_LINES,
+        _ => return None,
+    };
+    if !point_in(event.column, event.row, chrome.content) {
+        return None;
+    }
+    Some(apply_scroll_delta(
+        current_offset,
+        delta,
+        chrome.max_offset(),
+    ))
+}
+
+fn apply_scroll_offset(
+    app: &mut App,
+    offset: u16,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    match app.page {
+        Page::ThreadFeed => {
+            let max = list_max_offset(app);
+            app.feed.scroll_lines = clamp_thread_scroll_lines(offset, max);
+        }
+        Page::ThreadDetail => {
+            if let Some(detail) = app.detail.detail.as_ref() {
+                let width = app.content_width();
+                let viewport = app.scroll_viewport_height();
+                let palette = app.palette();
+                let images = app.images();
+                app.detail.scroll_top = clamp_scroll_top(
+                    offset,
+                    &detail.posts,
+                    width,
+                    viewport,
+                    palette,
+                    images,
+                );
+                maybe_load_more_detail(app, worker_tx);
+            }
+        }
+        Page::PmList | Page::Notifications | Page::Search | Page::MyThreads
+        | Page::MyReplies | Page::Favorites => {
+            let item_h = list_item_height(app.page);
+            let max = max_scroll_lines(
+                list_content_lines(app.list_page.items.len(), item_h),
+                app.scroll_viewport_height(),
+            );
+            app.list_page.scroll_lines = clamp_thread_scroll_lines(offset, max);
+            if let Some(kind) = app.list_page.kind {
+                maybe_load_more_list(app, worker_tx, kind);
+            }
+        }
+        Page::PmThread => {
+            let max = max_scroll_lines(
+                list_content_lines(app.pm_thread.messages.len(), PM_ITEM_HEIGHT),
+                app.scroll_viewport_height(),
+            );
+            app.pm_thread.scroll_lines = clamp_thread_scroll_lines(offset, max);
+        }
+        _ => {}
+    }
+}
+
+fn list_max_offset(app: &App) -> u16 {
+    max_scroll_lines(
+        list_content_lines(app.feed.threads.len(), ITEM_HEIGHT),
+        app.scroll_viewport_height(),
+    )
+}
+
+fn list_item_height(page: Page) -> u16 {
+    match page {
+        Page::PmList | Page::Notifications => SIMPLE_ITEM_HEIGHT,
+        _ => ITEM_HEIGHT,
+    }
+}
+
+fn handle_content_click(
+    app: &mut App,
+    row: u16,
+    column: u16,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let Some(chrome) = app.scroll_chrome else {
+        return;
+    };
+    if !point_in(column, row, chrome.content) {
+        return;
+    }
+
+    // Detail: scroll only via wheel/scrollbar; clicks do nothing.
+    if app.page == Page::ThreadDetail {
+        return;
+    }
+
+    let rel_y = row.saturating_sub(chrome.content.y);
+    let double = is_double_click(app, column, row);
+
+    match app.page {
+        Page::ThreadFeed => {
+            let idx = item_index_at_row(rel_y, app.feed.scroll_lines, ITEM_HEIGHT);
+            if idx >= app.feed.threads.len() {
+                return;
+            }
+            app.feed.selected = idx;
+            app.sync_feed_scroll();
+            if double {
+                if let Some(thread) = app.feed.threads.get(idx).cloned() {
+                    open_thread_detail(app, &thread, worker_tx);
+                }
+            }
+        }
+        Page::PmList | Page::Notifications => {
+            let idx = item_index_at_row(rel_y, app.list_page.scroll_lines, SIMPLE_ITEM_HEIGHT);
+            if idx >= app.list_page.items.len() {
+                return;
+            }
+            app.list_page.selected = idx;
+            app.sync_list_scroll();
+            if double {
+                open_list_selection(app, worker_tx);
+            }
+        }
+        Page::Search | Page::MyThreads | Page::MyReplies | Page::Favorites => {
+            let idx = item_index_at_row(rel_y, app.list_page.scroll_lines, ITEM_HEIGHT);
+            if idx >= app.list_page.items.len() {
+                return;
+            }
+            app.list_page.selected = idx;
+            app.sync_list_scroll();
+            if double {
+                open_list_selection(app, worker_tx);
+            }
+        }
+        Page::PmThread => {
+            let idx = item_index_at_row(rel_y, app.pm_thread.scroll_lines, PM_ITEM_HEIGHT);
+            if idx < app.pm_thread.messages.len() {
+                app.pm_thread.selected = idx;
+                app.sync_pm_scroll();
+            }
+        }
+        _ => {}
+    }
+
+    record_click(app, column, row);
+}
+
+fn is_double_click(app: &App, column: u16, row: u16) -> bool {
+    let Some(prev) = app.last_click else {
+        return false;
+    };
+    prev.page == app.page
+        && prev.column == column
+        && prev.row == row
+        && prev.at.elapsed() <= DOUBLE_CLICK
+}
+
+fn record_click(app: &mut App, column: u16, row: u16) {
+    app.last_click = Some(MouseClickState {
+        at: Instant::now(),
+        column,
+        row,
+        page: app.page,
+    });
+}
+
+fn point_in(column: u16, row: u16, area: Rect) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+pub fn install_scroll_chrome(
+    app: &mut App,
+    full_content: Rect,
+    content_len: u16,
+    offset: u16,
+) -> Rect {
+    let (content, bar) = hiptty_widgets::split_content_scrollbar(full_content);
+    let viewport = content.height;
+    let shown = content_len > viewport && bar.width > 0;
+    app.scroll_chrome = Some(hiptty_widgets::ScrollChrome {
+        content,
+        bar,
+        content_len,
+        viewport_len: viewport,
+        offset,
+        shown,
+    });
+    content
+}

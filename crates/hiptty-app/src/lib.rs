@@ -6,6 +6,7 @@ pub mod draw;
 pub mod event;
 pub mod handlers;
 pub mod list_page;
+pub mod mouse;
 pub mod nav;
 pub mod run;
 pub mod worker;

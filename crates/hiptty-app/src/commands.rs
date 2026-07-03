@@ -14,6 +14,9 @@ pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSend
     }
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts[0] {
+        "exit" | "quit" => {
+            app.quit = true;
+        }
         "q" => {
             app.overlay = Overlay::None;
             crate::nav::navigate_back(app);
@@ -63,7 +66,7 @@ fn open_page(app: &mut App, page: Page, worker_tx: &mpsc::UnboundedSender<Worker
 }
 
 pub fn command_hints() -> &'static str {
-    ":q :login :logout :theme dark|light :pm :notif :search <词>"
+    ":exit :q :login :logout :theme dark|light :pm :notif :search <词>"
 }
 
 pub fn settings_row_label(app: &App, row: usize) -> String {

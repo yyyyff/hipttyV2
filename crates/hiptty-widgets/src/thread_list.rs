@@ -1,7 +1,8 @@
 use hiptty_core::ThreadSummary;
-use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS};
+use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS, AVATAR_ROWS};
 use hiptty_render::{
-    display_title, format_count, format_relative_time, str_width, truncate_str, Palette,
+    clear_content_viewport, display_title, format_count, format_relative_time, str_width,
+    truncate_str, Palette,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -19,7 +20,7 @@ pub struct ThreadListProps<'a> {
     pub palette: Palette,
     pub threads: &'a [ThreadSummary],
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll_lines: u16,
     pub show_avatar: bool,
     pub loading: bool,
     pub images: Option<&'a mut ImageCache>,
@@ -45,32 +46,48 @@ pub fn ensure_thread_scroll(selected: usize, scroll: usize, capacity: usize) -> 
     }
 }
 
+pub fn ensure_thread_scroll_lines(
+    selected: usize,
+    scroll_lines: u16,
+    viewport_h: u16,
+) -> u16 {
+    crate::scroll::ensure_thread_scroll_lines(selected, scroll_lines, viewport_h, ITEM_HEIGHT)
+}
+
 pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, mut props: ThreadListProps<'_>) {
-    if area.height < ITEM_HEIGHT {
+    if area.height == 0 || area.width == 0 {
         return;
     }
+    clear_content_viewport(frame, area);
 
-    let capacity = thread_list_capacity(area.height);
-    let start = props.scroll;
-    let mut y = area.y;
+    let scroll = props.scroll_lines;
+    let viewport_bottom = scroll.saturating_add(area.height);
 
-    for (idx, thread) in props
-        .threads
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(capacity)
-    {
-        let item_h = ITEM_HEIGHT.min(area.y + area.height - y);
-        if item_h < 2 {
+    for (idx, thread) in props.threads.iter().enumerate() {
+        let item_top = (idx as u16).saturating_mul(ITEM_HEIGHT);
+        let item_bottom = item_top.saturating_add(ITEM_HEIGHT);
+        if item_bottom <= scroll {
+            continue;
+        }
+        if item_top >= viewport_bottom {
             break;
         }
+
+        let draw_y = area.y.saturating_add(item_top.saturating_sub(scroll));
+        let draw_h = item_bottom
+            .min(viewport_bottom)
+            .saturating_sub(item_top.max(scroll));
+        if draw_h == 0 {
+            continue;
+        }
+
         let item_area = Rect {
             x: area.x,
-            y,
+            y: draw_y,
             width: area.width,
-            height: item_h,
+            height: draw_h,
         };
+        let intra_skip = scroll.saturating_sub(item_top);
         draw_thread_item(
             frame,
             item_area,
@@ -78,9 +95,9 @@ pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, mut props: ThreadList
             idx == props.selected,
             props.palette,
             props.show_avatar,
+            intra_skip,
             &mut props.images,
         );
-        y += ITEM_HEIGHT;
     }
 }
 
@@ -91,14 +108,20 @@ fn draw_thread_item(
     selected: bool,
     palette: Palette,
     show_avatar: bool,
+    intra_skip: u16,
     images: &mut Option<&mut ImageCache>,
 ) {
-    let content_h = 2u16.min(area.height);
+    const CONTENT_ROWS: u16 = 2;
+    let visible_rows = CONTENT_ROWS.saturating_sub(intra_skip).min(area.height);
+    if visible_rows == 0 {
+        return;
+    }
+
     let selector_area = Rect {
         x: area.x,
         y: area.y,
         width: SELECTOR_W,
-        height: content_h,
+        height: visible_rows,
     };
     draw_selector(frame, selector_area, selected, palette);
 
@@ -106,7 +129,7 @@ fn draw_thread_item(
         x: area.x + SELECTOR_W,
         y: area.y,
         width: area.width.saturating_sub(SELECTOR_W),
-        height: content_h,
+        height: visible_rows,
     };
 
     let cols = Layout::horizontal([
@@ -115,19 +138,46 @@ fn draw_thread_item(
     ])
     .split(body);
 
-    if show_avatar {
+    if show_avatar && intra_skip < AVATAR_ROWS {
         if let Some(cache) = images.as_deref() {
             let (avatar, placeholder) =
                 cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
-            draw_avatar_entry(frame, cols[0], avatar, placeholder, palette, 0);
+            let avatar_area = Rect {
+                height: AVATAR_ROWS.saturating_sub(intra_skip).min(area.height),
+                ..cols[0]
+            };
+            draw_avatar_entry(
+                frame,
+                avatar_area,
+                avatar,
+                placeholder,
+                palette,
+                intra_skip,
+            );
         }
     }
 
     let right_area = cols[1];
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(right_area);
-
-    draw_title_row(frame, rows[0], thread, selected, palette);
-    draw_meta_row(frame, rows[1], thread, selected, palette);
+    let mut text_y = right_area.y;
+    if intra_skip == 0 && visible_rows >= 1 {
+        let row = Rect {
+            x: right_area.x,
+            y: text_y,
+            width: right_area.width,
+            height: 1,
+        };
+        draw_title_row(frame, row, thread, selected, palette);
+        text_y = text_y.saturating_add(1);
+    }
+    if intra_skip <= 1 && text_y < right_area.y + visible_rows {
+        let row = Rect {
+            x: right_area.x,
+            y: text_y,
+            width: right_area.width,
+            height: 1,
+        };
+        draw_meta_row(frame, row, thread, selected, palette);
+    }
 }
 
 fn draw_selector(frame: &mut Frame<'_>, area: Rect, selected: bool, palette: Palette) {

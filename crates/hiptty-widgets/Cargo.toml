@@ -11,4 +11,5 @@ hiptty-image = { workspace = true }
 hiptty-render = { workspace = true }
 ratatui = { workspace = true }
 ratatui-textarea = "0.9.2"
+tui-scrollbar = { version = "0.2.7", features = ["crossterm_0_28"] }
 unicode-width = { workspace = true }

@@ -3,7 +3,7 @@ use hiptty_core::{
     list_item_to_thread_summary, AdapterError, ErrorCode, ListItem, Theme,
     ThreadSummary,
 };
-use hiptty_widgets::{MAIN_MENU_ITEMS, SIMPLE_ITEM_HEIGHT};
+use hiptty_widgets::MAIN_MENU_ITEMS;
 use tokio::sync::mpsc;
 
 use crate::app::{App, DetailFetchMode, DetailState, Overlay, Page};
@@ -309,7 +309,7 @@ pub fn request_list_page(
     app.list_page.loading = true;
     if page == 1 {
         app.list_page.selected = 0;
-        app.list_page.scroll = 0;
+        app.list_page.scroll_lines = 0;
     }
     app.list_page.page = page;
     let _ = worker_tx.send(WorkerRequest::LoadSimpleList {
@@ -321,7 +321,7 @@ pub fn request_list_page(
     });
 }
 
-fn maybe_load_more_list(
+pub fn maybe_load_more_list(
     app: &mut App,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
     kind: ListPageKind,
@@ -339,7 +339,7 @@ fn maybe_load_more_list(
     }
 }
 
-fn open_list_selection(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn open_list_selection(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let Some(item) = app.list_page.items.get(app.list_page.selected).cloned() else {
         return;
     };
@@ -620,35 +620,3 @@ fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
 }
 
-pub fn handle_mouse_click(app: &mut App, row: u16, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
-    let content_top = 3u16;
-    if row < content_top {
-        return;
-    }
-    let rel = row.saturating_sub(content_top);
-    match app.page {
-        Page::ThreadFeed => {
-            let idx = app.feed.scroll + (rel / hiptty_widgets::ITEM_HEIGHT) as usize;
-            if idx < app.feed.threads.len() {
-                app.feed.selected = idx;
-                app.sync_feed_scroll();
-            }
-        }
-        Page::PmList | Page::Notifications => {
-            let idx = app.list_page.scroll + (rel / SIMPLE_ITEM_HEIGHT) as usize;
-            if idx < app.list_page.items.len() {
-                app.list_page.selected = idx;
-                app.sync_list_scroll();
-            }
-        }
-        Page::Search | Page::MyThreads | Page::MyReplies | Page::Favorites => {
-            let idx = app.list_page.scroll + (rel / hiptty_widgets::ITEM_HEIGHT) as usize;
-            if idx < app.list_page.items.len() {
-                app.list_page.selected = idx;
-                app.sync_list_scroll();
-            }
-        }
-        _ => {}
-    }
-    let _ = worker_tx;
-}
