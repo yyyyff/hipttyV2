@@ -12,6 +12,8 @@ use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 
 use crate::composer::{ComposerState, ConfirmDeleteState};
+use crate::list_page::{ListPageState, PmThreadState};
+use crate::nav::NavStack;
 use crate::worker::WorkerRequest;
 
 /// How the next `ThreadDetailLoaded` response should merge into state.
@@ -30,12 +32,38 @@ pub enum Page {
     Login,
     ThreadFeed,
     ThreadDetail,
+    PmList,
+    PmThread,
+    Notifications,
+    Search,
+    MyThreads,
+    MyReplies,
+    Favorites,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     None,
     ForumPicker,
+    MainMenu,
+    Help,
+    Settings,
+    SearchPrompt,
+    CommandBar,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OverlayState {
+    pub main_menu_selected: usize,
+    pub settings_selected: usize,
+    pub command_input: String,
+    pub search_input: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UnreadState {
+    pub has_pm: bool,
+    pub has_notifications: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -139,8 +167,16 @@ pub struct App {
     pub viewport_width: u16,
     pub viewport_height: u16,
     pub toast: Option<String>,
+    pub toast_until: Option<u64>,
+    pub toast_is_error: bool,
     pub composer: Option<ComposerState>,
     pub confirm_delete: Option<ConfirmDeleteState>,
+    pub nav_stack: NavStack,
+    pub list_page: ListPageState,
+    pub pm_thread: PmThreadState,
+    pub overlay_state: OverlayState,
+    pub unread: UnreadState,
+    pub blacklist_count: usize,
     pub quit: bool,
     pub profile: String,
     pub config_dir: std::path::PathBuf,
@@ -185,8 +221,16 @@ impl App {
             viewport_width: 80,
             viewport_height: 24,
             toast: None,
+            toast_until: None,
+            toast_is_error: false,
             composer: None,
             confirm_delete: None,
+            nav_stack: NavStack::default(),
+            list_page: ListPageState::default(),
+            pm_thread: PmThreadState::default(),
+            overlay_state: OverlayState::default(),
+            unread: UnreadState::default(),
+            blacklist_count: 0,
             quit: false,
             profile,
             config_dir,
@@ -237,6 +281,40 @@ impl App {
             Page::Startup | Page::Login => String::new(),
             Page::ThreadFeed => forum_name(self.feed.fid).unwrap_or("Forum").to_string(),
             Page::ThreadDetail => self.detail_breadcrumb(),
+            Page::PmList => "私信".into(),
+            Page::PmThread => format!("私信 · {}", self.pm_thread.peer_name),
+            Page::Notifications => "通知".into(),
+            Page::Search => {
+                if self.list_page.search_query.is_empty() {
+                    "搜索".into()
+                } else {
+                    format!("搜索: \"{}\"", self.list_page.search_query)
+                }
+            }
+            Page::MyThreads => "我的帖子".into(),
+            Page::MyReplies => "我的回复".into(),
+            Page::Favorites => "我的收藏".into(),
+        }
+    }
+
+    pub fn set_toast(&mut self, message: impl Into<String>, is_error: bool) {
+        let msg = message.into();
+        self.toast = Some(msg);
+        self.toast_is_error = is_error;
+        self.toast_until = if is_error {
+            None
+        } else {
+            Some(self.tick.saturating_add(40))
+        };
+    }
+
+    pub fn poll_toast(&mut self) {
+        if let Some(until) = self.toast_until {
+            if self.tick >= until {
+                self.toast = None;
+                self.toast_until = None;
+                self.toast_is_error = false;
+            }
         }
     }
 
@@ -249,17 +327,47 @@ impl App {
         }
         match self.overlay {
             Overlay::ForumPicker => "j/k  Enter  Esc",
+            Overlay::MainMenu => "j/k  Enter  Esc",
+            Overlay::Help => "Enter / Esc 关闭",
+            Overlay::Settings => "j/k  Enter  Esc",
+            Overlay::SearchPrompt => "Enter 搜索  Esc 取消",
+            Overlay::CommandBar => "Enter 执行  Esc 取消",
             Overlay::None => match self.page {
                 Page::Startup => "Esc 退出",
                 Page::Login => "Tab/↑↓ 切换 · Enter 确认 · Esc 退出",
                 Page::ThreadFeed => {
-                    "j/k ↑↓  Enter 打开  r 回复  n 新帖  f 切换版块  / 搜索  b 返回"
+                    "j/k ↑↓  Enter 打开  r 回复  n 新帖  f 版块  / 搜索  Esc 菜单  ? 帮助  : 命令"
                 }
                 Page::ThreadDetail => {
                     "j/k ↑↓  PgUp/Dn  r 回复  q 引用  e 编辑  d 删除  g/G 首页/末页  b 返回"
                 }
+                Page::PmList => "j/k  Enter 打开  d 删除  b 返回  Esc 菜单",
+                Page::PmThread => "r 回复  d 删除对话  j/k 滚动  b 返回",
+                Page::Notifications => "j/k  Enter 跳转  b 返回  Esc 菜单",
+                Page::Search => "j/k  Enter 打开  / 新搜索  b 返回  Esc 菜单",
+                Page::MyThreads | Page::MyReplies | Page::Favorites => {
+                    "j/k  Enter 打开  b 返回  Esc 菜单"
+                }
             },
         }
+    }
+
+    pub fn sync_list_scroll(&mut self) {
+        let capacity = thread_list_capacity(self.main_content_height());
+        self.list_page.scroll = ensure_thread_scroll(
+            self.list_page.selected,
+            self.list_page.scroll,
+            capacity,
+        );
+    }
+
+    pub fn sync_pm_scroll(&mut self) {
+        let capacity = hiptty_widgets::pm_thread_capacity(self.main_content_height());
+        self.pm_thread.scroll = ensure_thread_scroll(
+            self.pm_thread.selected,
+            self.pm_thread.scroll,
+            capacity,
+        );
     }
 
     pub fn forum_picker_fids(&self) -> Vec<u32> {

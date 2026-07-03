@@ -8,6 +8,7 @@ pub enum ComposerKind {
     Quote,
     NewThread,
     Edit,
+    PmReply,
 }
 
 #[derive(Debug)]
@@ -23,6 +24,7 @@ pub struct ComposerState {
     pub submitting: bool,
     pub error: Option<String>,
     pub image_path: Option<String>,
+    pub pm_uid: Option<String>,
 }
 
 impl ComposerState {
@@ -54,6 +56,7 @@ impl ComposerState {
             submitting: false,
             error: None,
             image_path: None,
+            pm_uid: None,
         }
     }
 

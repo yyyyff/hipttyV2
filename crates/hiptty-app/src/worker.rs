@@ -3,8 +3,11 @@ use hiptty_core::{
     AdapterResult, Credentials, PostAction, PostResult, PrePostInfo, SessionInfo, ThreadDetail,
     ThreadList, SECURITY_QUESTIONS,
 };
+use hiptty_core::SearchQuery;
 use hiptty_image::ImageKind;
 use tokio::sync::mpsc;
+
+use crate::list_page::ListPageKind;
 
 #[derive(Debug)]
 pub enum WorkerRequest {
@@ -41,6 +44,29 @@ pub enum WorkerRequest {
         action: PostAction,
         path: String,
     },
+    LoadSimpleList {
+        kind: ListPageKind,
+        page: u32,
+        fid: u32,
+        query: String,
+        search_id: Option<String>,
+    },
+    LoadPmThread {
+        uid: String,
+    },
+    SendPm {
+        uid: String,
+        content: String,
+    },
+    PmDelete {
+        uid: String,
+    },
+    LoadThreadAtPost {
+        tid: String,
+        pid: String,
+    },
+    CheckUnread,
+    LoadBlacklist,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +113,33 @@ pub enum WorkerResponse {
     ComposerImageUploaded {
         path: String,
         result: AdapterResult<String>,
+    },
+    SimpleListLoaded {
+        kind: ListPageKind,
+        result: AdapterResult<hiptty_core::SimpleList>,
+    },
+    PmThreadLoaded {
+        uid: String,
+        result: AdapterResult<hiptty_core::SimpleList>,
+    },
+    PmSent {
+        uid: String,
+        result: AdapterResult<()>,
+    },
+    PmDeleted {
+        uid: String,
+        result: AdapterResult<()>,
+    },
+    ThreadAtPostLoaded {
+        tid: String,
+        result: AdapterResult<ThreadDetail>,
+    },
+    UnreadChecked {
+        has_pm: bool,
+        has_notifications: bool,
+    },
+    BlacklistLoaded {
+        result: AdapterResult<Vec<String>>,
     },
 }
 
@@ -179,6 +232,67 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                         delete,
                         result,
                     });
+                }
+                WorkerRequest::LoadSimpleList {
+                    kind,
+                    page,
+                    fid,
+                    query,
+                    search_id,
+                } => {
+                    let result = async {
+                        match kind {
+                            ListPageKind::PmList => client.pm_list().await,
+                            ListPageKind::Notifications => client.notifications().await,
+                            ListPageKind::Search => {
+                                let mut q = SearchQuery::new(query);
+                                q.fid = Some(fid.to_string());
+                                q.page = page.max(1);
+                                if let Some(id) = search_id {
+                                    client.new_posts(Some(&id), page.max(1)).await
+                                } else {
+                                    client.search(q).await
+                                }
+                            }
+                            ListPageKind::MyThreads => client.my_threads(page.max(1)).await,
+                            ListPageKind::MyReplies => client.my_replies(page.max(1)).await,
+                            ListPageKind::Favorites => client.favorites(page.max(1)).await,
+                        }
+                    }
+                    .await;
+                    let _ = tx.send(WorkerResponse::SimpleListLoaded { kind, result });
+                }
+                WorkerRequest::LoadPmThread { uid } => {
+                    let result = client.pm_thread(&uid).await;
+                    let _ = tx.send(WorkerResponse::PmThreadLoaded { uid, result });
+                }
+                WorkerRequest::SendPm { uid, content } => {
+                    let result = client.send_pm(&uid, &content).await;
+                    let _ = tx.send(WorkerResponse::PmSent { uid, result });
+                }
+                WorkerRequest::PmDelete { uid } => {
+                    let result = client.pm_delete(&uid).await;
+                    let _ = tx.send(WorkerResponse::PmDeleted { uid, result });
+                }
+                WorkerRequest::LoadThreadAtPost { tid, pid } => {
+                    let result = client.thread_at_post(&tid, &pid).await;
+                    let _ = tx.send(WorkerResponse::ThreadAtPostLoaded { tid, result });
+                }
+                WorkerRequest::CheckUnread => {
+                    let has_pm = client.check_new_pm().await.unwrap_or(false);
+                    let has_notifications = client
+                        .notifications()
+                        .await
+                        .map(|list| list.items.iter().any(|i| i.is_new))
+                        .unwrap_or(false);
+                    let _ = tx.send(WorkerResponse::UnreadChecked {
+                        has_pm,
+                        has_notifications,
+                    });
+                }
+                WorkerRequest::LoadBlacklist => {
+                    let result = client.blacklist().await;
+                    let _ = tx.send(WorkerResponse::BlacklistLoaded { result });
                 }
                 WorkerRequest::UploadComposerImage { action, path } => {
                     let result = async {

@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use hiptty_adapter::ForumClient;
 use hiptty_render::clear_terminal_graphics;
 use ratatui::backend::CrosstermBackend;
@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::app::App;
 use crate::draw::draw;
 use crate::event::{handle_key, handle_worker_response, startup};
+use crate::handlers::handle_mouse_click;
 use crate::worker::{spawn_worker, WorkerRequest, WorkerResponse};
 
 pub async fn run<C: ForumClient + Send + Sync + 'static>(
@@ -52,6 +53,9 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, key, &worker_tx);
                 }
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    handle_mouse_click(app, mouse.row, &worker_tx);
+                }
                 Event::Resize(_, _) => {
                     app.sync_feed_scroll();
                     if app.page == crate::app::Page::ThreadDetail {
@@ -69,6 +73,9 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
         if last_tick.elapsed() >= tick_rate {
             app.tick = app.tick.wrapping_add(1);
             last_tick = std::time::Instant::now();
+            if app.session.logged_in && app.tick % 60 == 0 {
+                let _ = worker_tx.send(WorkerRequest::CheckUnread);
+            }
         }
 
         if app.quit {

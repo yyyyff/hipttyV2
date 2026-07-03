@@ -1,8 +1,12 @@
 pub mod app;
+pub mod commands;
 pub mod composer;
 pub mod config;
 pub mod draw;
 pub mod event;
+pub mod handlers;
+pub mod list_page;
+pub mod nav;
 pub mod run;
 pub mod worker;
 

@@ -12,6 +12,9 @@ use crate::composer::{
     quote_header, quote_post_action, reply_thread_action, ComposerKind, ComposerState,
     ConfirmDeleteState,
 };
+use crate::handlers::{
+    handle_global_key, handle_list_page_key, handle_overlay_key, handle_pm_thread_key,
+};
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -21,6 +24,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSende
     }
     if app.composer.is_some() {
         handle_composer_key(app, key, worker_tx);
+        return;
+    }
+    if app.overlay != Overlay::None && app.overlay != Overlay::ForumPicker {
+        handle_overlay_key(app, key, worker_tx);
+        return;
+    }
+    if handle_global_key(app, key, worker_tx) {
         return;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -34,7 +44,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSende
             Page::Login => handle_login_key(app, key, worker_tx),
             Page::ThreadFeed => handle_feed_key(app, key, worker_tx),
             Page::ThreadDetail => handle_detail_key(app, key, worker_tx),
+            Page::PmList | Page::Notifications => handle_list_page_key(app, key, worker_tx),
+            Page::Search | Page::MyThreads | Page::MyReplies | Page::Favorites => {
+                handle_list_page_key(app, key, worker_tx)
+            }
+            Page::PmThread => handle_pm_thread_key(app, key, worker_tx),
         },
+        _ => {}
     }
 }
 
@@ -382,7 +398,7 @@ fn open_thread_detail(
     request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
 }
 
-fn request_thread_detail(
+pub fn request_thread_detail(
     app: &mut App,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
     page: u32,
@@ -465,6 +481,9 @@ pub fn handle_worker_response(
     response: WorkerResponse,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
+    if crate::handlers::handle_worker_extensions(app, &response, worker_tx) {
+        return;
+    }
     match response {
         WorkerResponse::Session(info) => {
             if !app.startup_done {
@@ -473,6 +492,7 @@ pub fn handle_worker_response(
                     app.session = info;
                     app.page = Page::ThreadFeed;
                     request_threads(app, worker_tx, 1);
+                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
                 } else if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
                     app.prefill_login(&creds);
                     app.login.loading = true;
@@ -499,12 +519,14 @@ pub fn handle_worker_response(
                     let plain = password_plain.unwrap_or_else(|| app.login.password.clone());
                     app.on_login_success(username, &plain);
                     request_threads(app, worker_tx, 1);
+                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
                 } else {
                     app.session.logged_in = true;
                     app.session.username = Some(username);
                     app.login.loading = false;
                     app.page = Page::ThreadFeed;
                     request_threads(app, worker_tx, 1);
+                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
                 }
             }
             Err(err) => {
@@ -721,10 +743,17 @@ pub fn handle_worker_response(
                 app.sync_detail_scroll();
             }
         }
+        WorkerResponse::SimpleListLoaded { .. }
+        | WorkerResponse::PmThreadLoaded { .. }
+        | WorkerResponse::PmSent { .. }
+        | WorkerResponse::PmDeleted { .. }
+        | WorkerResponse::ThreadAtPostLoaded { .. }
+        | WorkerResponse::UnreadChecked { .. }
+        | WorkerResponse::BlacklistLoaded { .. } => {}
     }
 }
 
-fn prefetch_detail_images(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn prefetch_detail_images(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let posts: Vec<_> = app
         .detail
         .detail
@@ -759,7 +788,7 @@ fn prefetch_feed_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
     enqueue_image_jobs(app, jobs, worker_tx);
 }
 
-fn enqueue_image_jobs(
+pub fn enqueue_image_jobs(
     app: &mut App,
     jobs: Vec<hiptty_image::FetchRequest>,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
@@ -775,7 +804,7 @@ fn enqueue_image_jobs(
     app.dispatch_image_fetches(pending, worker_tx);
 }
 
-fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
         app.session.logged_in = false;
         let _ = worker_tx.send(WorkerRequest::AutoLogin(StoredCreds {
@@ -932,6 +961,12 @@ fn submit_composer(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
     }
     composer.submitting = true;
     composer.error = None;
+    if composer.kind == ComposerKind::PmReply {
+        if let Some(uid) = composer.pm_uid.clone() {
+            let _ = worker_tx.send(WorkerRequest::SendPm { uid, content });
+        }
+        return;
+    }
     let subject = if composer.show_subject {
         Some(composer.subject.clone())
     } else {

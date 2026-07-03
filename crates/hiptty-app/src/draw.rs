@@ -1,8 +1,12 @@
+use hiptty_core::{forum_name, list_item_to_thread_summary};
 use hiptty_widgets::{
-    draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
-    draw_loading_indicator, draw_login, draw_startup, draw_status_bar, draw_thread_list,
-    draw_title_bar, main_layout, ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps,
-    LoginFormProps, StartupProps, ThreadListProps, TitleBarProps,
+    draw_command_bar, draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list,
+    draw_forum_picker, draw_help_overlay, draw_loading_indicator, draw_login, draw_main_menu,
+    draw_pm_thread, draw_search_prompt, draw_settings_panel, draw_simple_list, draw_startup,
+    draw_status_bar, draw_thread_list, draw_title_bar, main_layout, ComposerProps, ConfirmProps,
+    FloorListProps, ForumPickerProps, HelpOverlayProps, LoginFormProps, MainMenuProps,
+    PmThreadProps, SettingsProps, SearchPromptProps, SimpleListProps, StartupProps,
+    ThreadListProps, TitleBarProps,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -15,12 +19,27 @@ use crate::app::{App, Overlay, Page};
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     let _images_changed = app.images_mut().map(|cache| cache.poll()).unwrap_or(false);
+    app.poll_toast();
     let prev_w = app.viewport_width;
     let prev_h = app.viewport_height;
     app.viewport_width = area.width;
     app.viewport_height = area.height;
     if app.page == Page::ThreadFeed {
         app.sync_feed_scroll();
+    }
+    if matches!(
+        app.page,
+        Page::PmList
+            | Page::Notifications
+            | Page::Search
+            | Page::MyThreads
+            | Page::MyReplies
+            | Page::Favorites
+    ) {
+        app.sync_list_scroll();
+    }
+    if app.page == Page::PmThread {
+        app.sync_pm_scroll();
     }
     if app.page == Page::ThreadDetail && (prev_w != area.width || prev_h != area.height) {
         app.sync_detail_scroll();
@@ -39,7 +58,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Page::Login => draw_login_page(frame, app, area),
         Page::ThreadFeed => draw_feed_shell(frame, app, area),
         Page::ThreadDetail => draw_detail_shell(frame, app, area),
+        Page::PmList | Page::Notifications => draw_simple_list_shell(frame, app, area, true),
+        Page::Search | Page::MyThreads | Page::MyReplies | Page::Favorites => {
+            draw_thread_list_shell(frame, app, area, false)
+        }
+        Page::PmThread => draw_pm_thread_shell(frame, app, area),
     }
+
+    draw_overlays(frame, app, area);
 
     if let Some(confirm) = &app.confirm_delete {
         draw_confirm_dialog(
@@ -75,6 +101,65 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(toast) = &app.toast {
         draw_toast(frame, area, app, toast);
     }
+}
+
+fn draw_overlays(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let palette = app.palette();
+    match app.overlay {
+        Overlay::MainMenu => draw_main_menu(
+            frame,
+            area,
+            MainMenuProps {
+                palette,
+                selected: app.overlay_state.main_menu_selected,
+            },
+        ),
+        Overlay::Help => draw_help_overlay(frame, area, HelpOverlayProps { palette }),
+        Overlay::Settings => draw_settings_panel(
+            frame,
+            area,
+            SettingsProps {
+                palette,
+                settings: &app.settings,
+                selected: app.overlay_state.settings_selected,
+                blacklist_count: app.blacklist_count,
+            },
+        ),
+        Overlay::SearchPrompt => draw_search_prompt(
+            frame,
+            area,
+            SearchPromptProps {
+                palette,
+                input: &app.overlay_state.search_input,
+                forum_name: forum_name(app.feed.fid).unwrap_or("Forum"),
+            },
+        ),
+        Overlay::CommandBar => draw_command_bar(
+            frame,
+            area,
+            hiptty_widgets::CommandBarProps {
+                palette,
+                input: &app.overlay_state.command_input,
+            },
+        ),
+        Overlay::ForumPicker | Overlay::None => {}
+    }
+}
+
+fn shell_title_bar(frame: &mut Frame<'_>, app: &App, title_area: Rect, right: Option<&str>) {
+    draw_title_bar(
+        frame,
+        title_area,
+        TitleBarProps {
+            palette: app.palette(),
+            tick: app.tick,
+            username: app.session.username.as_deref(),
+            has_notifications: app.unread.has_notifications,
+            has_pm: app.unread.has_pm,
+            breadcrumb: &app.breadcrumb(),
+            breadcrumb_right: right,
+        },
+    );
 }
 
 fn draw_startup_page(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -122,19 +207,7 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let palette = app.palette();
     let [title_area, title_rule, content_area, status_rule, status_area] = main_layout(area);
 
-    draw_title_bar(
-        frame,
-        title_area,
-        TitleBarProps {
-            palette,
-            tick: app.tick,
-            username: app.session.username.as_deref(),
-            has_notifications: false,
-            has_pm: false,
-            breadcrumb: &forum_breadcrumb(app),
-            breadcrumb_right: None,
-        },
-    );
+    shell_title_bar(frame, app, title_area, None);
     draw_dim_rule(frame, title_rule, palette);
 
     {
@@ -158,21 +231,10 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.feed.loading {
         draw_loading_indicator(frame, content_area, palette, app.tick);
     }
-
-    if let Some(err) = &app.feed.error {
-        frame.render_widget(
-            Paragraph::new(err.as_str()).style(palette.error_style()),
-            Rect {
-                x: content_area.x,
-                y: content_area.y,
-                width: content_area.width,
-                height: 1,
-            },
-        );
-    }
+    draw_list_error(frame, content_area, palette, app.feed.error.as_deref());
 
     draw_dim_rule(frame, status_rule, palette);
-    draw_status_bar(frame, status_area, palette, feed_status_hints());
+    draw_status_bar(frame, status_area, palette, app.status_hints());
 
     if app.overlay == Overlay::ForumPicker {
         draw_forum_picker(
@@ -194,12 +256,6 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let palette = app.palette();
     let chunks = main_layout(area);
-    let title_area = chunks[0];
-    let title_rule = chunks[1];
-    let content_area = chunks[2];
-    let status_rule = chunks[3];
-    let status_area = chunks[4];
-
     let counts = app.detail_title_counts();
     let show_loading = app.detail.loading || app.detail.loading_more;
 
@@ -210,7 +266,7 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             if !show_loading || detail_state.loading_more {
                 draw_floor_list(
                     frame,
-                    content_area,
+                    chunks[2],
                     FloorListProps {
                         palette,
                         posts: &detail.posts,
@@ -222,71 +278,137 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 );
             }
         } else if detail_state.loading {
-            frame.render_widget(Clear, content_area);
+            frame.render_widget(Clear, chunks[2]);
         }
     }
 
     if show_loading {
-        draw_loading_indicator(frame, content_area, palette, app.tick);
+        draw_loading_indicator(frame, chunks[2], palette, app.tick);
     }
+    draw_list_error(frame, chunks[2], palette, app.detail.error.as_deref());
 
-    if let Some(err) = &app.detail.error {
+    shell_title_bar(frame, app, chunks[0], counts.as_deref());
+    draw_dim_rule(frame, chunks[1], palette);
+    draw_dim_rule(frame, chunks[3], palette);
+    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+}
+
+fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
+    let palette = app.palette();
+    let chunks = main_layout(area);
+    shell_title_bar(frame, app, chunks[0], None);
+    draw_dim_rule(frame, chunks[1], palette);
+
+    let images = app.image_cache.as_mut();
+    draw_simple_list(
+        frame,
+        chunks[2],
+        SimpleListProps {
+            palette,
+            items: &app.list_page.items,
+            selected: app.list_page.selected,
+            scroll: app.list_page.scroll,
+            show_avatar,
+            images,
+        },
+    );
+    if app.list_page.loading {
+        draw_loading_indicator(frame, chunks[2], palette, app.tick);
+    }
+    draw_list_error(frame, chunks[2], palette, app.list_page.error.as_deref());
+
+    draw_dim_rule(frame, chunks[3], palette);
+    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+}
+
+fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
+    let palette = app.palette();
+    let chunks = main_layout(area);
+    shell_title_bar(frame, app, chunks[0], None);
+    draw_dim_rule(frame, chunks[1], palette);
+
+    let threads: Vec<_> = app
+        .list_page
+        .items
+        .iter()
+        .map(list_item_to_thread_summary)
+        .collect();
+    let images = app.image_cache.as_mut();
+    draw_thread_list(
+        frame,
+        chunks[2],
+        ThreadListProps {
+            palette,
+            threads: &threads,
+            selected: app.list_page.selected,
+            scroll: app.list_page.scroll,
+            show_avatar,
+            loading: app.list_page.loading,
+            images,
+        },
+    );
+    if app.list_page.loading {
+        draw_loading_indicator(frame, chunks[2], palette, app.tick);
+    }
+    draw_list_error(frame, chunks[2], palette, app.list_page.error.as_deref());
+
+    draw_dim_rule(frame, chunks[3], palette);
+    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+}
+
+fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let palette = app.palette();
+    let chunks = main_layout(area);
+    shell_title_bar(frame, app, chunks[0], None);
+    draw_dim_rule(frame, chunks[1], palette);
+
+    draw_pm_thread(
+        frame,
+        chunks[2],
+        PmThreadProps {
+            palette,
+            messages: &app.pm_thread.messages,
+            my_username: app.session.username.as_deref().unwrap_or(""),
+            selected: app.pm_thread.selected,
+            scroll: app.pm_thread.scroll,
+        },
+    );
+    if app.pm_thread.loading {
+        draw_loading_indicator(frame, chunks[2], palette, app.tick);
+    }
+    draw_list_error(frame, chunks[2], palette, app.pm_thread.error.as_deref());
+
+    draw_dim_rule(frame, chunks[3], palette);
+    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+}
+
+fn draw_list_error(frame: &mut Frame<'_>, area: Rect, palette: hiptty_render::Palette, err: Option<&str>) {
+    if let Some(err) = err {
         frame.render_widget(
-            Paragraph::new(err.as_str()).style(palette.error_style()),
+            Paragraph::new(err).style(palette.error_style()),
             Rect {
-                x: content_area.x,
-                y: content_area.y,
-                width: content_area.width,
+                x: area.x,
+                y: area.y,
+                width: area.width,
                 height: 1,
             },
         );
     }
-
-    draw_title_bar(
-        frame,
-        title_area,
-        TitleBarProps {
-            palette,
-            tick: app.tick,
-            username: app.session.username.as_deref(),
-            has_notifications: false,
-            has_pm: false,
-            breadcrumb: &detail_breadcrumb(app),
-            breadcrumb_right: counts.as_deref(),
-        },
-    );
-    draw_dim_rule(frame, title_rule, palette);
-
-    draw_dim_rule(frame, status_rule, palette);
-    draw_status_bar(frame, status_area, palette, detail_status_hints());
-}
-
-fn forum_breadcrumb(app: &App) -> String {
-    hiptty_core::forum_name(app.feed.fid)
-        .unwrap_or("Forum")
-        .to_string()
-}
-
-fn detail_breadcrumb(app: &App) -> String {
-    app.detail_breadcrumb()
-}
-
-fn feed_status_hints() -> &'static str {
-    "j/k ↑↓  Enter 打开  r 回复  n 新帖  f 切换版块  / 搜索  b 返回"
-}
-
-fn detail_status_hints() -> &'static str {
-    "j/k ↑↓  PgUp/Dn  r 回复  q 引用  e 编辑  d 删除  g/G 首页/末页  b 返回"
 }
 
 fn draw_toast(frame: &mut Frame<'_>, area: Rect, app: &App, message: &str) {
-    let width = (message.len() as u16 + 4).min(area.width.saturating_sub(4));
+    let width = (message.chars().count() as u16 + 4).min(area.width.saturating_sub(4));
     let height = 3;
     let x = area.x + area.width.saturating_sub(width + 2);
     let y = area.y + area.height.saturating_sub(height + 2);
+    let style = if app.toast_is_error {
+        app.palette().error_style()
+    } else {
+        app.palette().accent_style()
+    };
     frame.render_widget(
         Paragraph::new(message)
-            .style(app.palette().accent_style())
+            .style(style)
             .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL)),
         Rect {
             x,

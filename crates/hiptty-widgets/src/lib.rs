@@ -1,5 +1,8 @@
 pub mod composer;
 pub mod floor_list;
+pub mod overlays;
+pub mod pm_thread;
+pub mod simple_list;
 pub mod forum_picker;
 pub mod layout;
 pub mod login;
@@ -12,6 +15,15 @@ pub mod title_bar;
 pub use composer::{
     composer_height, draw_composer, draw_confirm_dialog, ComposerFocus, ComposerProps,
     ConfirmProps,
+};
+pub use overlays::{
+    draw_command_bar, draw_help_overlay, draw_main_menu, draw_search_prompt,
+    draw_settings_panel, CommandBarProps, HelpOverlayProps, MainMenuProps, SettingsProps,
+    SearchPromptProps, MAIN_MENU_ITEMS,
+};
+pub use pm_thread::{draw_pm_thread, pm_thread_capacity, PmThreadProps, PM_ITEM_HEIGHT};
+pub use simple_list::{
+    draw_simple_list, simple_list_capacity, SimpleListProps, SIMPLE_ITEM_HEIGHT,
 };
 pub use floor_list::{
     clamp_scroll_top, detail_step_down, detail_step_up, draw_floor_list, ensure_scroll_top,
