@@ -1,14 +1,28 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use hiptty_core::{AdapterError, ErrorCode};
-use hiptty_widgets::LoginField;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui_textarea::{Input as TextareaInput, Key as TextareaKey};
+use hiptty_core::{AdapterError, ErrorCode, PostAction};
+use hiptty_widgets::{ComposerFocus, LoginField};
 use tokio::sync::mpsc;
 
 use hiptty_image::thread_avatar_job;
 
 use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
+use crate::composer::{
+    delete_label, delete_post_action, edit_body, edit_header, edit_post_action, new_thread_action,
+    quote_header, quote_post_action, reply_thread_action, ComposerKind, ComposerState,
+    ConfirmDeleteState,
+};
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.confirm_delete.is_some() {
+        handle_confirm_delete_key(app, key, worker_tx);
+        return;
+    }
+    if app.composer.is_some() {
+        handle_composer_key(app, key, worker_tx);
+        return;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
@@ -205,6 +219,12 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
             app.sync_feed_scroll();
             maybe_load_more(app, worker_tx);
         }
+        KeyCode::Char('r') => {
+            if let Some(thread) = app.feed.threads.get(app.feed.selected).cloned() {
+                open_feed_reply(app, &thread.tid);
+            }
+        }
+        KeyCode::Char('n') => open_new_thread(app),
         KeyCode::Enter => {
             let selected = app.feed.selected;
             if let Some(thread) = app.feed.threads.get(selected).cloned() {
@@ -344,6 +364,10 @@ fn handle_detail_key(
                 }
             }
         }
+        KeyCode::Char('r') => open_detail_reply(app),
+        KeyCode::Char('q') => open_detail_quote(app, worker_tx),
+        KeyCode::Char('e') => open_detail_edit(app, worker_tx),
+        KeyCode::Char('d') => open_detail_delete_confirm(app),
         _ => {}
     }
 }
@@ -571,6 +595,117 @@ pub fn handle_worker_response(
                 }
             }
         }
+        WorkerResponse::PrePostReady { action, result } => {
+            if app
+                .composer
+                .as_ref()
+                .is_none_or(|composer| composer.action != action)
+            {
+                return;
+            }
+            let fallback = if app
+                .composer
+                .as_ref()
+                .is_some_and(|composer| composer.kind == ComposerKind::Edit)
+            {
+                app.selected_post().map(edit_body)
+            } else {
+                None
+            };
+            let Some(composer) = app.composer.as_mut() else {
+                return;
+            };
+            match result {
+                Ok(info) => {
+                    composer.apply_prepare(info.quote_text, info.subject, fallback);
+                    composer.error = None;
+                }
+                Err(err) => {
+                    if is_auth_required(&err) {
+                        app.composer = None;
+                        try_auto_relogin(app, worker_tx);
+                    } else {
+                        composer.preparing = false;
+                        composer.error = Some(error_message(&err));
+                    }
+                }
+            }
+        }
+        WorkerResponse::PostSubmitted {
+            action,
+            delete,
+            result,
+        } => {
+            if delete {
+                if let Some(confirm) = app.confirm_delete.as_mut() {
+                    if confirm.action == action {
+                        confirm.submitting = false;
+                    }
+                }
+            } else if let Some(composer) = app.composer.as_mut() {
+                if composer.action == action {
+                    composer.submitting = false;
+                }
+            }
+            match result {
+                Ok(post_result) if post_result.success => {
+                    let new_subject = app.composer.as_ref().map(|c| c.subject.clone());
+                    app.composer = None;
+                    app.confirm_delete = None;
+                    app.toast = Some(post_result.message.clone());
+                    apply_post_success(
+                        app,
+                        &action,
+                        delete,
+                        post_result,
+                        worker_tx,
+                        new_subject,
+                    );
+                }
+                Ok(post_result) => {
+                    app.toast = Some(post_result.message);
+                }
+                Err(err) => {
+                    if is_auth_required(&err) {
+                        app.composer = None;
+                        app.confirm_delete = None;
+                        try_auto_relogin(app, worker_tx);
+                    } else if matches!(err.code(), ErrorCode::RateLimit) {
+                        app.toast = Some(format_rate_limit(&err));
+                    } else {
+                        let message = error_message(&err);
+                        if delete {
+                            if let Some(confirm) = app.confirm_delete.as_mut() {
+                                confirm.submitting = false;
+                            }
+                            app.toast = Some(message);
+                        } else if let Some(composer) = app.composer.as_mut() {
+                            composer.error = Some(message);
+                        } else {
+                            app.toast = Some(message);
+                        }
+                    }
+                }
+            }
+        }
+        WorkerResponse::ComposerImageUploaded { path, result } => {
+            let Some(composer) = app.composer.as_mut() else {
+                return;
+            };
+            composer.submitting = false;
+            match result {
+                Ok(image_id) => {
+                    let tag = format!("[attachimg]{image_id}[/attachimg]");
+                    composer.textarea.insert_str(&tag);
+                    composer.image_path = None;
+                    composer.focus = ComposerFocus::Body;
+                    composer.error = None;
+                }
+                Err(err) => {
+                    composer.error = Some(format!("上传失败 ({path}): {}", error_message(&err)));
+                }
+            }
+        }
         WorkerResponse::ImageFetched { url, kind, result } => {
             let outcome = match result {
                 Ok(bytes) => hiptty_image::FetchOutcome::Ok(bytes),
@@ -665,4 +800,375 @@ fn error_message(err: &AdapterError) -> String {
 
 pub fn startup(_app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let _ = worker_tx.send(WorkerRequest::CheckSession);
+}
+
+fn handle_composer_key(
+    app: &mut App,
+    key: KeyEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl {
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Char('S') => submit_composer(app, worker_tx),
+            KeyCode::Char('i') | KeyCode::Char('I') => start_image_path_input(app),
+            _ => {}
+        }
+        return;
+    }
+
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
+
+    if composer.preparing || composer.submitting {
+        if matches!(key.code, KeyCode::Esc) {
+            app.composer = None;
+        }
+        return;
+    }
+
+    if composer.image_path.is_some() {
+        handle_image_path_key(app, key, worker_tx);
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.composer = None,
+        KeyCode::Tab | KeyCode::BackTab => cycle_composer_focus(app, key.code == KeyCode::BackTab),
+        KeyCode::Backspace if composer.focus == ComposerFocus::Subject => {
+            composer.subject.pop();
+        }
+        KeyCode::Char(c) if composer.focus == ComposerFocus::Subject => {
+            composer.subject.push(c);
+        }
+        _ if composer.focus == ComposerFocus::Body => {
+            composer.textarea.input(textarea_input(key));
+        }
+        _ => {}
+    }
+}
+
+fn handle_image_path_key(
+    app: &mut App,
+    key: KeyEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            composer.image_path = None;
+            composer.focus = ComposerFocus::Body;
+            composer.error = None;
+        }
+        KeyCode::Enter => {
+            let path = composer.image_path.clone().unwrap_or_default();
+            if path.trim().is_empty() {
+                composer.error = Some("请输入图片路径".into());
+                return;
+            }
+            composer.submitting = true;
+            composer.error = None;
+            let action = composer.action.clone();
+            let _ = worker_tx.send(WorkerRequest::UploadComposerImage { action, path });
+        }
+        KeyCode::Backspace => {
+            if let Some(path) = composer.image_path.as_mut() {
+                path.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(path) = composer.image_path.as_mut() {
+                path.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cycle_composer_focus(app: &mut App, reverse: bool) {
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
+    if !composer.show_subject {
+        composer.focus = ComposerFocus::Body;
+        return;
+    }
+    composer.focus = match (composer.focus, reverse) {
+        (ComposerFocus::Subject, false) => ComposerFocus::Body,
+        (ComposerFocus::Body, false) => ComposerFocus::Subject,
+        (ComposerFocus::Body, true) => ComposerFocus::Subject,
+        (ComposerFocus::Subject, true) => ComposerFocus::Body,
+        (ComposerFocus::ImagePath, _,) => ComposerFocus::Body,
+    };
+}
+
+fn start_image_path_input(app: &mut App) {
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
+    composer.image_path = Some(String::new());
+    composer.focus = ComposerFocus::ImagePath;
+    composer.error = None;
+}
+
+fn submit_composer(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
+    if composer.preparing || composer.submitting {
+        return;
+    }
+    let content = composer.body_text();
+    if content.trim().is_empty() {
+        composer.error = Some("正文不能为空".into());
+        return;
+    }
+    if composer.show_subject && composer.subject.trim().is_empty() {
+        composer.error = Some("标题不能为空".into());
+        return;
+    }
+    composer.submitting = true;
+    composer.error = None;
+    let subject = if composer.show_subject {
+        Some(composer.subject.clone())
+    } else {
+        None
+    };
+    let _ = worker_tx.send(WorkerRequest::SubmitPost {
+        action: composer.action.clone(),
+        content,
+        subject,
+        delete: false,
+    });
+}
+
+fn handle_confirm_delete_key(
+    app: &mut App,
+    key: KeyEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let Some(confirm) = app.confirm_delete.as_ref() else {
+        return;
+    };
+    if confirm.submitting {
+        if matches!(key.code, KeyCode::Esc) {
+            app.confirm_delete = None;
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') => app.confirm_delete = None,
+        KeyCode::Char('y') => {
+            let action = confirm.action.clone();
+            if let Some(confirm) = app.confirm_delete.as_mut() {
+                confirm.submitting = true;
+            }
+            let _ = worker_tx.send(WorkerRequest::SubmitPost {
+                action,
+                content: String::new(),
+                subject: None,
+                delete: true,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn open_feed_reply(app: &mut App, tid: &str) {
+    let action = reply_thread_action(tid);
+    app.composer = Some(ComposerState::open(
+        ComposerKind::Reply,
+        action,
+        "回复".into(),
+        String::new(),
+        None,
+    ));
+}
+
+fn open_new_thread(app: &mut App) {
+    let fid = app.feed.fid;
+    let forum = hiptty_core::forum_name(fid).unwrap_or("Forum");
+    let action = new_thread_action(fid);
+    app.composer = Some(ComposerState::open(
+        ComposerKind::NewThread,
+        action,
+        format!("新帖 · {forum}"),
+        String::new(),
+        Some(String::new()),
+    ));
+}
+
+fn open_detail_reply(app: &mut App) {
+    let tid = app.detail.tid.clone();
+    let action = reply_thread_action(&tid);
+    app.composer = Some(ComposerState::open(
+        ComposerKind::Reply,
+        action,
+        "回复".into(),
+        String::new(),
+        None,
+    ));
+}
+
+fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let Some(post) = app.selected_post().cloned() else {
+        app.toast = Some("请先选择要引用的楼层".into());
+        return;
+    };
+    let tid = app.detail.tid.clone();
+    let action = quote_post_action(&tid, &post.pid);
+    app.composer = Some(ComposerState::preparing(
+        ComposerKind::Quote,
+        action.clone(),
+        quote_header(&post),
+    ));
+    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+}
+
+fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let Some(post) = app.selected_post().cloned() else {
+        app.toast = Some("请先选择要编辑的楼层".into());
+        return;
+    };
+    let tid = app.detail.tid.clone();
+    let fid = app.detail.fid.unwrap_or(app.feed.fid);
+    let action = edit_post_action(&tid, &post.pid, fid, post.page);
+    let body = edit_body(&post);
+    let subject = app.detail.title.clone();
+    app.composer = Some(ComposerState::open(
+        ComposerKind::Edit,
+        action.clone(),
+        edit_header(&post),
+        body,
+        Some(subject),
+    ));
+    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+}
+
+fn open_detail_delete_confirm(app: &mut App) {
+    let Some(post) = app.selected_post().cloned() else {
+        app.toast = Some("请先选择要删除的楼层".into());
+        return;
+    };
+    let tid = app.detail.tid.clone();
+    let fid = app.detail.fid.unwrap_or(app.feed.fid);
+    let action = delete_post_action(&tid, &post.pid, fid);
+    app.confirm_delete = Some(ConfirmDeleteState {
+        action,
+        label: delete_label(&post),
+        submitting: false,
+    });
+}
+
+fn apply_post_success(
+    app: &mut App,
+    action: &PostAction,
+    delete: bool,
+    result: hiptty_core::PostResult,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    new_subject: Option<String>,
+) {
+    if delete {
+        app.page = Page::ThreadFeed;
+        request_threads(app, worker_tx, 1);
+        return;
+    }
+    match action {
+        PostAction::NewThread { .. } => {
+            if let Some(tid) = result.tid {
+                app.page = Page::ThreadDetail;
+                app.detail = DetailState {
+                    tid: tid.clone(),
+                    fid: Some(app.feed.fid),
+                    title: new_subject.unwrap_or_default(),
+                    reply_count: None,
+                    view_count: None,
+                    detail: result.detail,
+                    selected: 0,
+                    scroll_top: 0,
+                    loading: false,
+                    loading_more: false,
+                    pending_fetch: None,
+                    error: None,
+                };
+                if app.detail.detail.is_none() {
+                    request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+                } else {
+                    prefetch_detail_images(app, worker_tx);
+                    app.sync_detail_scroll();
+                }
+            }
+        }
+        PostAction::ReplyThread { .. }
+        | PostAction::ReplyPost { .. }
+        | PostAction::QuotePost { .. }
+        | PostAction::EditPost { .. } => {
+            if let Some(detail) = result.detail {
+                app.detail.detail = Some(detail);
+                app.detail.loading = false;
+                app.detail.loading_more = false;
+                app.detail.pending_fetch = None;
+                app.detail.error = None;
+                prefetch_detail_images(app, worker_tx);
+                app.sync_detail_scroll();
+            } else if app.page == Page::ThreadDetail {
+                request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn textarea_input(key: KeyEvent) -> TextareaInput {
+    if key.kind == KeyEventKind::Release {
+        return TextareaInput::default();
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if key.code == KeyCode::BackTab {
+        return TextareaInput {
+            key: TextareaKey::Tab,
+            ctrl,
+            alt,
+            shift: true,
+        };
+    }
+    let key_code = match key.code {
+        KeyCode::Char(c) => TextareaKey::Char(c),
+        KeyCode::Backspace => TextareaKey::Backspace,
+        KeyCode::Enter => TextareaKey::Enter,
+        KeyCode::Left => TextareaKey::Left,
+        KeyCode::Right => TextareaKey::Right,
+        KeyCode::Up => TextareaKey::Up,
+        KeyCode::Down => TextareaKey::Down,
+        KeyCode::Tab => TextareaKey::Tab,
+        KeyCode::Delete => TextareaKey::Delete,
+        KeyCode::Home => TextareaKey::Home,
+        KeyCode::End => TextareaKey::End,
+        KeyCode::PageUp => TextareaKey::PageUp,
+        KeyCode::PageDown => TextareaKey::PageDown,
+        KeyCode::Esc => TextareaKey::Esc,
+        KeyCode::F(n) => TextareaKey::F(n),
+        _ => TextareaKey::Null,
+    };
+    TextareaInput {
+        key: key_code,
+        ctrl,
+        alt,
+        shift,
+    }
+}
+
+fn format_rate_limit(err: &AdapterError) -> String {
+    let msg = err.to_string();
+    if let Some(rest) = msg.strip_prefix("wait ") {
+        if let Some(secs) = rest.split_whitespace().next() {
+            return format!("发帖过快，请 {secs} 秒后重试");
+        }
+    }
+    format!("发帖过快: {msg}")
 }

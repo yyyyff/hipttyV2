@@ -1,6 +1,7 @@
 use hiptty_adapter::ForumClient;
 use hiptty_core::{
-    AdapterResult, Credentials, SessionInfo, ThreadDetail, ThreadList, SECURITY_QUESTIONS,
+    AdapterResult, Credentials, PostAction, PostResult, PrePostInfo, SessionInfo, ThreadDetail,
+    ThreadList, SECURITY_QUESTIONS,
 };
 use hiptty_image::ImageKind;
 use tokio::sync::mpsc;
@@ -26,6 +27,19 @@ pub enum WorkerRequest {
     FetchImage {
         url: String,
         kind: ImageKind,
+    },
+    PreparePost {
+        action: PostAction,
+    },
+    SubmitPost {
+        action: PostAction,
+        content: String,
+        subject: Option<String>,
+        delete: bool,
+    },
+    UploadComposerImage {
+        action: PostAction,
+        path: String,
     },
 }
 
@@ -60,6 +74,19 @@ pub enum WorkerResponse {
         url: String,
         kind: ImageKind,
         result: AdapterResult<Vec<u8>>,
+    },
+    PrePostReady {
+        action: PostAction,
+        result: AdapterResult<PrePostInfo>,
+    },
+    PostSubmitted {
+        action: PostAction,
+        delete: bool,
+        result: AdapterResult<PostResult>,
+    },
+    ComposerImageUploaded {
+        path: String,
+        result: AdapterResult<String>,
     },
 }
 
@@ -128,6 +155,49 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                 WorkerRequest::FetchImage { url, kind } => {
                     let result = client.fetch_url(&url).await;
                     let _ = tx.send(WorkerResponse::ImageFetched { url, kind, result });
+                }
+                WorkerRequest::PreparePost { action } => {
+                    let result = client.prepare_post(action.clone()).await;
+                    let _ = tx.send(WorkerResponse::PrePostReady { action, result });
+                }
+                WorkerRequest::SubmitPost {
+                    action,
+                    content,
+                    subject,
+                    delete,
+                } => {
+                    let result = client
+                        .post(
+                            action.clone(),
+                            &content,
+                            subject.as_deref(),
+                            delete,
+                        )
+                        .await;
+                    let _ = tx.send(WorkerResponse::PostSubmitted {
+                        action,
+                        delete,
+                        result,
+                    });
+                }
+                WorkerRequest::UploadComposerImage { action, path } => {
+                    let result = async {
+                        let bytes = std::fs::read(&path).map_err(|e| {
+                            hiptty_core::AdapterError::InvalidInput(format!(
+                                "cannot read {}: {e}",
+                                path
+                            ))
+                        })?;
+                        let filename = std::path::Path::new(&path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image.jpg");
+                        client
+                            .upload_image(action, &bytes, filename)
+                            .await
+                    }
+                    .await;
+                    let _ = tx.send(WorkerResponse::ComposerImageUploaded { path, result });
                 }
             }
         }

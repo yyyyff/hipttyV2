@@ -11,6 +11,7 @@ use hiptty_widgets::{
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 
+use crate::composer::{ComposerState, ConfirmDeleteState};
 use crate::worker::WorkerRequest;
 
 /// How the next `ThreadDetailLoaded` response should merge into state.
@@ -138,6 +139,8 @@ pub struct App {
     pub viewport_width: u16,
     pub viewport_height: u16,
     pub toast: Option<String>,
+    pub composer: Option<ComposerState>,
+    pub confirm_delete: Option<ConfirmDeleteState>,
     pub quit: bool,
     pub profile: String,
     pub config_dir: std::path::PathBuf,
@@ -182,6 +185,8 @@ impl App {
             viewport_width: 80,
             viewport_height: 24,
             toast: None,
+            composer: None,
+            confirm_delete: None,
             quit: false,
             profile,
             config_dir,
@@ -236,6 +241,12 @@ impl App {
     }
 
     pub fn status_hints(&self) -> &'static str {
+        if self.confirm_delete.is_some() {
+            return "y 确认  n/Esc 取消";
+        }
+        if self.composer.is_some() {
+            return "Ctrl+S 发送  Esc 取消  Ctrl+I 插图";
+        }
         match self.overlay {
             Overlay::ForumPicker => "j/k  Enter  Esc",
             Overlay::None => match self.page {
@@ -354,6 +365,11 @@ impl App {
         self.login.error = None;
         self.page = Page::ThreadFeed;
         self.feed = FeedState::new(self.settings.default_forums[0]);
+    }
+
+    pub fn selected_post(&self) -> Option<&hiptty_core::Post> {
+        let detail = self.detail.detail.as_ref()?;
+        detail.posts.get(self.detail.selected)
     }
 
     pub fn prefill_login(&mut self, creds: &StoredCredentials) {

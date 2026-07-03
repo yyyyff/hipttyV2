@@ -12,7 +12,7 @@ pub mod settings;
 pub mod thread;
 pub mod user;
 
-pub use content::{ContentNode, ContentSpan, Style, TextSpan};
+pub use content::{content_nodes_to_plain, ContentNode, ContentSpan, Style, TextSpan};
 pub use error::{AdapterError, AdapterResult, ErrorCode};
 pub use forum::{
     forum_name, is_valid_forum, Forum, COOKIE_DOMAIN, DEFAULT_FORUM_IDS, FORUMS, FORUM_BASE_PATH,

@@ -11,6 +11,7 @@ hiptty-core = { workspace = true }
 hiptty-image = { workspace = true }
 hiptty-render = { workspace = true }
 hiptty-widgets = { workspace = true }
+ratatui-textarea = "0.9.2"
 ratatui-image = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

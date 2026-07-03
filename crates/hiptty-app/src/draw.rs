@@ -1,8 +1,8 @@
 use hiptty_widgets::{
-    draw_dim_rule, draw_floor_list, draw_forum_picker, draw_loading_indicator, draw_login,
-    draw_startup, draw_status_bar, draw_thread_list, draw_title_bar, main_layout,
-    FloorListProps, ForumPickerProps, LoginFormProps, StartupProps, ThreadListProps,
-    TitleBarProps,
+    draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
+    draw_loading_indicator, draw_login, draw_startup, draw_status_bar, draw_thread_list,
+    draw_title_bar, main_layout, ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps,
+    LoginFormProps, StartupProps, ThreadListProps, TitleBarProps,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -39,6 +39,37 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Page::Login => draw_login_page(frame, app, area),
         Page::ThreadFeed => draw_feed_shell(frame, app, area),
         Page::ThreadDetail => draw_detail_shell(frame, app, area),
+    }
+
+    if let Some(confirm) = &app.confirm_delete {
+        draw_confirm_dialog(
+            frame,
+            area,
+            ConfirmProps {
+                palette: app.palette(),
+                title: "确认删除",
+                message: &confirm.label,
+                loading: confirm.submitting,
+            },
+        );
+    }
+
+    if let Some(composer) = &app.composer {
+        draw_composer(
+            frame,
+            area,
+            ComposerProps {
+                palette: app.palette(),
+                header: &composer.header,
+                subject: &composer.subject,
+                show_subject: composer.show_subject,
+                focus: composer.focus,
+                textarea: &composer.textarea,
+                error: composer.error.as_deref(),
+                loading: composer.preparing || composer.submitting,
+                image_path: composer.image_path.as_deref(),
+            },
+        );
     }
 
     if let Some(toast) = &app.toast {

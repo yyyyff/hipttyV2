@@ -88,3 +88,65 @@ pub enum ContentNode {
         url: Option<String>,
     },
 }
+
+/// Flatten parsed post content into BBCode-ish plain text for editing.
+pub fn content_nodes_to_plain(nodes: &[ContentNode]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        match node {
+            ContentNode::Text { spans } => {
+                for span in spans {
+                    match span {
+                        ContentSpan::Text { text, .. } => out.push_str(text),
+                        ContentSpan::Smiley { code, .. } => {
+                            if let Some(code) = code {
+                                out.push_str(code);
+                            }
+                        }
+                    }
+                }
+            }
+            ContentNode::Quote { text, .. } => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(text);
+            }
+            ContentNode::Image { url, .. } => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[img]{url}[/img]"));
+            }
+            ContentNode::Attachment { url, .. } => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[url]{url}[/url]"));
+            }
+            ContentNode::FloorRef { floor, author, .. } => {
+                let author = author.as_deref().unwrap_or("?");
+                out.push_str(&format!(">>> #{floor} @{author} "));
+            }
+            ContentNode::AppMark { text, .. } => out.push_str(text),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_text_joins_spans() {
+        let nodes = vec![ContentNode::Text {
+            spans: vec![ContentSpan::Text {
+                text: "hello".into(),
+                style: Style::default(),
+                url: None,
+            }],
+        }];
+        assert_eq!(content_nodes_to_plain(&nodes), "hello");
+    }
+}
