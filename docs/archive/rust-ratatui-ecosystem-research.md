@@ -1,6 +1,8 @@
 # hiptty → Rust + Ratatui 生态库调研
 
-**文档角色**：技术栈迁移至 Rust + Ratatui + ratatui-image 时的 crate 选型参考。以 `tui-design.md` 为设计依据，按 UI 壳 / 正文渲染 / 图像 / Adapter / 平台 / 测试六层映射外部库，标明可复用与须自研边界。
+> **归档**：2026-06-26 调研快照，crate 选型已大部分落地。生态库相关备忘见 [`../tui-implementation-decisions.md`](../tui-implementation-decisions.md) §5.8。
+
+**文档角色**：技术栈迁移至 Rust + Ratatui + ratatui-image 时的 crate 选型参考。以初版 `tui-design.md` 为设计依据，按 UI 壳 / 正文渲染 / 图像 / Adapter / 平台 / 测试六层映射外部库，标明可复用与须自研边界。
 
 **调研日期**：2026-06-26
 
@@ -231,5 +233,6 @@ TUI 层需要自研的是 **论坛富文本渲染**（ContentNode → ratatui::T
 
 ## 相关文档
 
-- [tui-design.md](./tui-design.md) — TUI 设计文档（页面布局、视觉规范、快捷键体系、组件清单）
-- [api.md](./api.md) — CLI API 参考（数据模型、命令结构、错误模型）
+- [tui-design.md](./tui-design.md) — 初版 TUI 设计稿（归档）
+- [tui-implementation-decisions.md](../tui-implementation-decisions.md) — TUI 决策与备忘
+- [api.md](../api.md) — CLI API 参考

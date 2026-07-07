@@ -1,8 +1,10 @@
 # hiptty TUI 设计文档
 
+> **归档**：本文档为 2026-07-01 初版设计稿，仅供历史参考。当前实现以代码为准；部分历史决策见 [`../tui-implementation-decisions.md`](../tui-implementation-decisions.md)。
+
 **版本**: 1.0
 **日期**: 2026-07-01
-**定位**: hiptty 终端客户端 UI/UX 权威参考，所有 TUI 开发以此为准。
+**定位**: 初版 UI/UX 规格（页面布局、视觉规范、快捷键、组件清单）。
 
 ---
 
