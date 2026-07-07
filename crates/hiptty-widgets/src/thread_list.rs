@@ -14,7 +14,6 @@ use ratatui::{
 pub const ITEM_HEIGHT: u16 = 3;
 const CONTENT_ROWS: u16 = 2;
 const SELECTOR_W: u16 = 1;
-const SELECTOR_GAP: u16 = 1;
 const CONTENT_RIGHT_PAD: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
 const COUNT_GAP: &str = "   ";
@@ -121,28 +120,45 @@ fn draw_thread_item(
         height: band_h,
     };
 
-    let bar_rows = if show_avatar {
+    let avatar_h = if show_avatar {
         AVATAR_ROWS.saturating_sub(intra_skip).min(band_h)
     } else {
-        band_h
+        0
     };
+    let bar_rows = if show_avatar { avatar_h } else { band_h };
     if bar_rows == 0 {
         return;
     }
 
-    let selector_area = Rect {
-        x: band.x,
-        y: band.y,
-        width: SELECTOR_W,
-        height: bar_rows,
-    };
-    draw_selector(frame, selector_area, selected, palette);
+    draw_selector(
+        frame,
+        Rect {
+            x: band.x,
+            y: band.y,
+            width: SELECTOR_W,
+            height: bar_rows,
+        },
+        selected,
+        palette,
+    );
+    if selected && area.height > band_h {
+        for row in band_h..area.height {
+            frame.render_widget(
+                Paragraph::new(" "),
+                Rect {
+                    x: band.x,
+                    y: area.y + row,
+                    width: SELECTOR_W,
+                    height: 1,
+                },
+            );
+        }
+    }
 
-    let body_inset = SELECTOR_W + if show_avatar { SELECTOR_GAP } else { 0 };
     let body = Rect {
-        x: band.x + body_inset,
+        x: band.x + SELECTOR_W,
         y: band.y,
-        width: band.width.saturating_sub(body_inset),
+        width: band.width.saturating_sub(SELECTOR_W),
         height: band_h,
     };
 
@@ -152,11 +168,11 @@ fn draw_thread_item(
     ])
     .split(body);
 
-    if show_avatar && intra_skip < AVATAR_ROWS {
+    if show_avatar && avatar_h > 0 && intra_skip < AVATAR_ROWS {
         if let Some(cache) = images.as_deref() {
             let (avatar, placeholder) = cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
             let avatar_area = Rect {
-                height: AVATAR_ROWS.saturating_sub(intra_skip).min(area.height),
+                height: avatar_h,
                 ..cols[0]
             };
             draw_avatar_entry(frame, avatar_area, avatar, placeholder, palette, intra_skip);
@@ -191,11 +207,18 @@ fn draw_selector(frame: &mut Frame<'_>, area: Rect, selected: bool, palette: Pal
         return;
     }
 
-    let lines: Vec<String> = std::iter::repeat_n("█".to_string(), area.height as usize).collect();
-    frame.render_widget(
-        Paragraph::new(lines.join("\n")).style(palette.accent_style()),
-        area,
-    );
+    let style = palette.accent_style();
+    for row in 0..area.height {
+        frame.render_widget(
+            Paragraph::new("█").style(style),
+            Rect {
+                x: area.x,
+                y: area.y + row,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
 }
 
 fn draw_title_row(
