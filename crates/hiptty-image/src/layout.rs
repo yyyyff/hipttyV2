@@ -4,7 +4,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 
 use crate::cache::ImageKind;
 
-pub const AVATAR_COLS: u16 = 5;
+pub const AVATAR_COLS: u16 = 4;
 pub const AVATAR_ROWS: u16 = 2;
 pub const SMILEY_COLS: u16 = 3;
 pub const SMILEY_ROWS: u16 = 1;

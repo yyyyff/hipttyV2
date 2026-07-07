@@ -13,12 +13,9 @@ use ratatui::{
 
 pub const ITEM_HEIGHT: u16 = 3;
 const CONTENT_ROWS: u16 = 2;
-/// Selection bar spans the title band only. Avatars reserve `AVATAR_ROWS` cells but
-/// render compactly on the first row; extending the bar into the meta row looks misaligned.
-const SELECTOR_ROWS: u16 = 1;
-const SELECTOR_W: u16 = 1;
 const CONTENT_RIGHT_PAD: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
+const AVATAR_GAP: u16 = 1;
 const COUNT_GAP: &str = "   ";
 
 pub struct ThreadListProps<'a> {
@@ -128,49 +125,17 @@ fn draw_thread_item(
     } else {
         0
     };
-    let bar_rows = if show_avatar {
-        SELECTOR_ROWS.saturating_sub(intra_skip).min(band_h)
-    } else {
-        band_h
-    };
-    if bar_rows == 0 {
-        return;
-    }
-
-    draw_selector(
-        frame,
-        Rect {
-            x: band.x,
-            y: band.y,
-            width: SELECTOR_W,
-            height: bar_rows,
-        },
-        selected,
-        palette,
-    );
-    if selected && area.height > band_h {
-        for row in band_h..area.height {
-            frame.render_widget(
-                Paragraph::new(" "),
-                Rect {
-                    x: band.x,
-                    y: area.y + row,
-                    width: SELECTOR_W,
-                    height: 1,
-                },
-            );
-        }
-    }
 
     let body = Rect {
-        x: band.x + SELECTOR_W,
+        x: band.x,
         y: band.y,
-        width: band.width.saturating_sub(SELECTOR_W),
+        width: band.width,
         height: band_h,
     };
 
     let cols = Layout::horizontal([
         Constraint::Length(if show_avatar { AVATAR_W } else { 0 }),
+        Constraint::Length(if show_avatar { AVATAR_GAP } else { 0 }),
         Constraint::Min(0),
     ])
     .split(body);
@@ -186,7 +151,7 @@ fn draw_thread_item(
         }
     }
 
-    let right_area = cols[1];
+    let right_area = cols[2];
     let mut text_y = right_area.y;
     if intra_skip == 0 && band_h >= 1 {
         let row = Rect {
@@ -206,25 +171,6 @@ fn draw_thread_item(
             height: 1,
         };
         draw_meta_row(frame, row, thread, selected, palette);
-    }
-}
-
-fn draw_selector(frame: &mut Frame<'_>, area: Rect, selected: bool, palette: Palette) {
-    if !selected || area.height == 0 || area.width == 0 {
-        return;
-    }
-
-    let style = palette.accent_style();
-    for row in 0..area.height {
-        frame.render_widget(
-            Paragraph::new("█").style(style),
-            Rect {
-                x: area.x,
-                y: area.y + row,
-                width: area.width,
-                height: 1,
-            },
-        );
     }
 }
 
@@ -255,7 +201,7 @@ fn draw_title_row(
     let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize);
 
     let title_style = if selected {
-        palette.selected_style()
+        palette.selected_style().bg(palette.accent_bg)
     } else {
         palette.title_style(thread.title_color.as_deref())
     };
@@ -263,12 +209,17 @@ fn draw_title_row(
     frame.render_widget(Paragraph::new(title_line).style(title_style), cols[0]);
 
     if !counts.is_empty() && cols[1].width > 0 {
+        let counts_style = if selected {
+            palette.secondary_style().bg(palette.accent_bg)
+        } else {
+            palette.secondary_style()
+        };
         frame.render_widget(
             Paragraph::new(truncate_str(
                 &counts,
                 cols[1].width.saturating_sub(1) as usize,
             ))
-            .style(palette.secondary_style())
+            .style(counts_style)
             .alignment(Alignment::Right),
             cols[1],
         );
@@ -287,7 +238,10 @@ fn draw_meta_row(
     let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
 
     let meta_style = if selected {
-        palette.accent_style().add_modifier(Modifier::BOLD)
+        palette
+            .accent_style()
+            .add_modifier(Modifier::BOLD)
+            .bg(palette.accent_bg)
     } else {
         palette.secondary_style()
     };

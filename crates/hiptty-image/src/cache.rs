@@ -11,7 +11,7 @@ use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::sliced::SlicedProtocol;
-use ratatui_image::Resize;
+use ratatui_image::{FilterType, Resize};
 
 use crate::avatar_disk::{AvatarDiskCache, AvatarDiskEntry};
 use crate::avatar_placeholder::noavatar_bytes;
@@ -390,11 +390,14 @@ fn decode_image(
             content_image_cell_size(&decode_picker, dyn_img.width(), dyn_img.height(), max_cols)
         }
     };
-    // Avatars always occupy the full layout slot. `Resize::Fit` skips upscaling when the
-    // source already fits inside the target at a smaller natural size — pre-resize to the
-    // exact cell dimensions first.
+    // Avatars must fill the layout slot exactly. `Resize::Fit`/`Scale` preserve aspect ratio
+    // (contain), which leaves a transparent band on the shorter axis. Stretch to the exact slot
+    // pixel size instead so the glyph aligns with the selection highlight.
     let dyn_img = if kind == ImageKind::Avatar {
-        Resize::Fit(None).resize(&dyn_img, picker.font_size(), size, None)
+        let font = picker.font_size();
+        let target_w = u32::from(size.width) * u32::from(font.width);
+        let target_h = u32::from(size.height) * u32::from(font.height);
+        dyn_img.resize_exact(target_w, target_h, FilterType::Lanczos3)
     } else {
         dyn_img
     };
@@ -414,7 +417,7 @@ mod tests {
         let url = "http://example.com/avatar.jpg".to_string();
         let mut entry = cache.avatar_placeholder().expect("placeholder").clone();
         if let ImageState::Ready { width, height, .. } = &mut entry.state {
-            *width = 4;
+            *width = 3;
             *height = 2;
         }
         entry.kind = ImageKind::Avatar;
