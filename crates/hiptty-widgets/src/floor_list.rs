@@ -733,13 +733,11 @@ fn draw_meta_row2(
 }
 
 fn draw_nav_bar(frame: &mut Frame<'_>, x: u16, y: u16, selected: bool, palette: Palette) {
-    let style = if selected {
-        palette.accent_style()
-    } else {
-        palette.muted_style()
-    };
+    if !selected {
+        return;
+    }
     frame.render_widget(
-        Paragraph::new("│").style(style),
+        Paragraph::new("│").style(palette.accent_style()),
         Rect {
             x,
             y,
