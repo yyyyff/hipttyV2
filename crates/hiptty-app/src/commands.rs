@@ -1,11 +1,11 @@
-use hiptty_core::{forum_name, Theme};
+use hiptty_core::forum_name;
 
 use crate::app::{App, Overlay, Page};
+use crate::handlers::request_list_page;
 use crate::list_page::ListPageKind;
 use crate::nav::navigate_to;
-use crate::handlers::request_list_page;
-use tokio::sync::mpsc;
 use crate::worker::WorkerRequest;
+use tokio::sync::mpsc;
 
 pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let input = raw.trim();
@@ -31,14 +31,6 @@ pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSend
             app.session.username = None;
             app.page = Page::Login;
             app.set_toast("已登出", false);
-        }
-        "theme" if parts.len() >= 2 => {
-            app.settings.theme = match parts[1] {
-                "light" => Theme::Light,
-                _ => Theme::Dark,
-            };
-            let _ = crate::config::save_settings(&app.settings_path, &app.settings);
-            app.set_toast(format!("主题已切换为 {:?}", app.settings.theme), false);
         }
         "pm" => open_page(app, Page::PmList, worker_tx),
         "notif" | "notifications" => open_page(app, Page::Notifications, worker_tx),
@@ -66,31 +58,24 @@ fn open_page(app: &mut App, page: Page, worker_tx: &mpsc::UnboundedSender<Worker
 }
 
 pub fn command_hints() -> &'static str {
-    ":exit :q :login :logout :theme dark|light :pm :notif :search <词>"
+    ":exit :q :login :logout :pm :notif :search <词>"
 }
 
 pub fn settings_row_label(app: &App, row: usize) -> String {
     match row {
         0 => format!(
-            "主题         [{}]",
-            match app.settings.theme {
-                Theme::Dark => "Dark",
-                Theme::Light => "Light",
-            }
-        ),
-        1 => format!(
             "默认版块 1   [{}]",
             forum_name(app.settings.default_forums[0]).unwrap_or("?")
         ),
-        2 => format!(
+        1 => format!(
             "默认版块 2   [{}]",
             forum_name(app.settings.default_forums[1]).unwrap_or("?")
         ),
-        3 => format!(
+        2 => format!(
             "默认版块 3   [{}]",
             forum_name(app.settings.default_forums[2]).unwrap_or("?")
         ),
-        4 => format!("黑名单       [{} 人]", app.blacklist_count),
+        3 => format!("黑名单       [{} 人]", app.blacklist_count),
         _ => String::new(),
     }
 }

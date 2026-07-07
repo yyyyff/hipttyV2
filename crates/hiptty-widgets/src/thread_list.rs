@@ -46,11 +46,7 @@ pub fn ensure_thread_scroll(selected: usize, scroll: usize, capacity: usize) -> 
     }
 }
 
-pub fn ensure_thread_scroll_lines(
-    selected: usize,
-    scroll_lines: u16,
-    viewport_h: u16,
-) -> u16 {
+pub fn ensure_thread_scroll_lines(selected: usize, scroll_lines: u16, viewport_h: u16) -> u16 {
     crate::scroll::ensure_thread_scroll_lines(selected, scroll_lines, viewport_h, ITEM_HEIGHT)
 }
 
@@ -140,20 +136,12 @@ fn draw_thread_item(
 
     if show_avatar && intra_skip < AVATAR_ROWS {
         if let Some(cache) = images.as_deref() {
-            let (avatar, placeholder) =
-                cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
+            let (avatar, placeholder) = cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
             let avatar_area = Rect {
                 height: AVATAR_ROWS.saturating_sub(intra_skip).min(area.height),
                 ..cols[0]
             };
-            draw_avatar_entry(
-                frame,
-                avatar_area,
-                avatar,
-                placeholder,
-                palette,
-                intra_skip,
-            );
+            draw_avatar_entry(frame, avatar_area, avatar, placeholder, palette, intra_skip);
         }
     }
 
@@ -220,10 +208,7 @@ fn draw_title_row(
         palette.title_style(thread.title_color.as_deref())
     };
 
-    frame.render_widget(
-        Paragraph::new(title_line).style(title_style),
-        cols[0],
-    );
+    frame.render_widget(Paragraph::new(title_line).style(title_style), cols[0]);
 
     if !counts.is_empty() && cols[1].width > 0 {
         frame.render_widget(
@@ -256,11 +241,8 @@ fn draw_meta_row(
 
     if time.is_empty() {
         frame.render_widget(
-            Paragraph::new(truncate_str(
-                &author,
-                area.width.saturating_sub(1) as usize,
-            ))
-            .style(meta_style),
+            Paragraph::new(truncate_str(&author, area.width.saturating_sub(1) as usize))
+                .style(meta_style),
             area,
         );
         return;
@@ -298,7 +280,9 @@ fn draw_meta_row(
         left_area,
     );
     frame.render_widget(
-        Paragraph::new(time).style(meta_style).alignment(Alignment::Right),
+        Paragraph::new(time)
+            .style(meta_style)
+            .alignment(Alignment::Right),
         right_area,
     );
 }
@@ -395,7 +379,7 @@ pub fn draw_loading_indicator(frame: &mut Frame<'_>, area: Rect, palette: Palett
     let frame_idx = ((tick / 3) as usize) % LOADING_FRAMES.len();
     frame.render_widget(
         Paragraph::new(LOADING_FRAMES[frame_idx])
-            .style(palette.dim_style())
+            .style(palette.muted_style())
             .alignment(Alignment::Center),
         indicator_area,
     );

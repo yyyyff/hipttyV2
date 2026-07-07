@@ -1,9 +1,5 @@
 use hiptty_render::str_width;
-use ratatui::{
-    layout::Rect,
-    widgets::Paragraph,
-    Frame,
-};
+use ratatui::{layout::Rect, widgets::Paragraph, Frame};
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use ratatui_image::Image;
 
@@ -77,7 +73,9 @@ pub fn draw_graphic_in_viewport(
                 }
             }
         }
-        Some(ImageState::Failed) => draw_fail_label(frame, viewport, fail_label, doc_x, doc_y, scroll_top, palette),
+        Some(ImageState::Failed) => draw_fail_label(
+            frame, viewport, fail_label, doc_x, doc_y, scroll_top, palette,
+        ),
         _ => draw_loading_label(frame, viewport, doc_x, doc_y, scroll_top, palette),
     }
 }
@@ -111,15 +109,12 @@ pub fn draw_image_entry(
         },
         Some(ImageState::Failed) => {
             frame.render_widget(
-                Paragraph::new(fail_label).style(palette.dim_style()),
+                Paragraph::new(fail_label).style(palette.muted_style()),
                 area,
             );
         }
         _ => {
-            frame.render_widget(
-                Paragraph::new("…").style(palette.dim_style()),
-                area,
-            );
+            frame.render_widget(Paragraph::new("…").style(palette.muted_style()), area);
         }
     }
 }
@@ -146,10 +141,7 @@ pub fn draw_avatar_entry(
         draw_image_entry(frame, area, placeholder, palette, "", slice_skip_rows);
         return;
     }
-    frame.render_widget(
-        Paragraph::new("…").style(palette.dim_style()),
-        area,
-    );
+    frame.render_widget(Paragraph::new("…").style(palette.muted_style()), area);
 }
 
 fn draw_fail_label(
@@ -167,7 +159,7 @@ fn draw_fail_label(
     }
     let w = image_area_width(label).min(viewport.width);
     frame.render_widget(
-        Paragraph::new(label).style(palette.dim_style()),
+        Paragraph::new(label).style(palette.muted_style()),
         Rect {
             x: doc_x.max(viewport.x),
             y: viewport.y.saturating_add(row as u16),
@@ -190,7 +182,7 @@ fn draw_loading_label(
         return;
     }
     frame.render_widget(
-        Paragraph::new("…").style(palette.dim_style()),
+        Paragraph::new("…").style(palette.muted_style()),
         Rect {
             x: doc_x.max(viewport.x),
             y: viewport.y.saturating_add(row as u16),

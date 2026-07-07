@@ -6,9 +6,9 @@ use hiptty_widgets::{
     draw_pm_thread, draw_search_prompt, draw_settings_panel, draw_simple_list, draw_startup,
     draw_status_bar, draw_thread_list, draw_title_bar, draw_vertical_scrollbar, list_content_lines,
     main_layout, title_bar_hits, ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps,
-    HelpOverlayProps, ITEM_HEIGHT, LoginFormProps, MainMenuProps, PM_ITEM_HEIGHT, PmThreadProps,
-    SettingsProps, SearchPromptProps, SIMPLE_ITEM_HEIGHT, SimpleListProps, StartupProps,
-    ThreadListProps, TitleBarProps,
+    HelpOverlayProps, LoginFormProps, MainMenuProps, PmThreadProps, SearchPromptProps,
+    SettingsProps, SimpleListProps, StartupProps, ThreadListProps, TitleBarProps, ITEM_HEIGHT,
+    PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -184,13 +184,7 @@ fn paint_scroll_area(
     let content = install_scroll_chrome(app, full_content, content_len, offset);
     if let Some(chrome) = app.scroll_chrome {
         if chrome.shown {
-            draw_vertical_scrollbar(
-                frame,
-                chrome.bar,
-                app.palette(),
-                chrome.lengths(),
-                offset,
-            );
+            draw_vertical_scrollbar(frame, chrome.bar, app.palette(), chrome.lengths(), offset);
         }
     }
     content
@@ -469,7 +463,12 @@ fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     draw_status_bar(frame, chunks[4], palette, app.status_hints());
 }
 
-fn draw_list_error(frame: &mut Frame<'_>, area: Rect, palette: hiptty_render::Palette, err: Option<&str>) {
+fn draw_list_error(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    palette: hiptty_render::Palette,
+    err: Option<&str>,
+) {
     if let Some(err) = err {
         frame.render_widget(
             Paragraph::new(err).style(palette.error_style()),
@@ -491,7 +490,7 @@ fn draw_toast(frame: &mut Frame<'_>, area: Rect, app: &App, message: &str) {
     let style = if app.toast_is_error {
         app.palette().error_style()
     } else {
-        app.palette().accent_style()
+        app.palette().success_style()
     };
     frame.render_widget(
         Paragraph::new(message)

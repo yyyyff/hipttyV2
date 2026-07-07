@@ -1,14 +1,14 @@
 use hiptty_core::{ContentNode, ContentSpan, Post};
-use hiptty_render::{Palette, wrap_plain, wrap_segments, StyledSegment};
+use hiptty_render::{wrap_plain, wrap_segments, Palette, StyledSegment};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
 
 use crate::cache::{ImageCache, ImageKind, ImageState};
+use crate::draw::IMAGE_FAIL_LABEL;
 use crate::layout::{SMILEY_COLS, SMILEY_ROWS};
 use crate::smiley::smiley_cache_key;
-use crate::draw::IMAGE_FAIL_LABEL;
 
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
@@ -54,7 +54,8 @@ pub fn layout_post_blocks(
             blocks.push(ContentBlock::Text(Line::from("")));
         }
     }
-    while matches!(blocks.last(), Some(ContentBlock::Text(line)) if line.spans.iter().all(|s| s.content.is_empty())) {
+    while matches!(blocks.last(), Some(ContentBlock::Text(line)) if line.spans.iter().all(|s| s.content.is_empty()))
+    {
         blocks.pop();
     }
     blocks
@@ -91,17 +92,20 @@ fn layout_content_node(
             } else {
                 format!("\u{f0c6} {name} ({size_text})")
             };
-            vec![ContentBlock::Text(Line::styled(line, palette.primary_style()))]
+            vec![ContentBlock::Text(Line::styled(
+                line,
+                palette.foreground_style(),
+            ))]
         }
         ContentNode::FloorRef { floor, author, .. } => {
             let author = author.as_deref().unwrap_or("?");
             let line = format!(">>> #{floor} @{author}");
-            vec![ContentBlock::Text(Line::styled(line, palette.accent_style()))]
+            vec![ContentBlock::Text(Line::styled(line, palette.link_style()))]
         }
         ContentNode::AppMark { text, .. } => {
             vec![ContentBlock::Text(Line::styled(
                 format!("▸ {text}"),
-                palette.dim_style(),
+                palette.muted_style(),
             ))]
         }
     }
@@ -142,11 +146,7 @@ fn layout_text_spans(
                 smilie_id,
             } => {
                 flush_text(&mut segments, &mut blocks);
-                let key = smiley_cache_key(
-                    code.as_deref(),
-                    smilie_id.as_deref(),
-                    url,
-                );
+                let key = smiley_cache_key(code.as_deref(), smilie_id.as_deref(), url);
                 blocks.push(image_block(key, ImageKind::Smiley, cache));
             }
         }
@@ -175,7 +175,7 @@ fn layout_quote(
     for line in wrap_plain(
         &header,
         body_w,
-        palette.accent_style().add_modifier(Modifier::BOLD),
+        palette.link_style().add_modifier(Modifier::BOLD),
     ) {
         blocks.push(ContentBlock::Text(prefix_quote_line(line, palette)));
     }
@@ -186,7 +186,7 @@ fn layout_quote(
 }
 
 fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
-    let mut spans = vec![Span::styled("┃  ", palette.dim_style())];
+    let mut spans = vec![Span::styled("┃  ", palette.muted_style())];
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -194,11 +194,7 @@ fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
 fn image_block(cache_key: String, kind: ImageKind, cache: &ImageCache) -> ContentBlock {
     let (width, height, failed) = match cache.get(&cache_key).map(|e| &e.state) {
         Some(ImageState::Ready { width, height, .. }) => (*width, *height, false),
-        Some(ImageState::Failed) => (
-            image_fail_width(kind),
-            image_fail_height(kind),
-            true,
-        ),
+        Some(ImageState::Failed) => (image_fail_width(kind), image_fail_height(kind), true),
         _ => (image_loading_width(kind), image_loading_height(kind), false),
     };
     match kind {
@@ -252,7 +248,7 @@ fn image_fail_height(kind: ImageKind) -> u16 {
 }
 
 fn core_style_to_ratatui(style: &hiptty_core::Style, palette: Palette) -> Style {
-    let mut out = palette.primary_style();
+    let mut out = palette.foreground_style();
     if let Some(fg) = style.fg.as_deref() {
         if let Some(color) = hiptty_render::parse_hex_color(fg) {
             out = out.fg(color);
@@ -285,7 +281,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use hiptty_core::{ContentNode, ContentSpan, Post, Style, Theme};
+    use hiptty_core::{ContentNode, ContentSpan, Post, Style};
     use ratatui_image::picker::Picker;
 
     use super::*;
@@ -305,7 +301,7 @@ mod tests {
     #[test]
     fn lazy_load_thumb_decodes_for_portrait_and_landscape() {
         let picker = Picker::halfblocks();
-        let palette = Palette::for_theme(Theme::Dark);
+        let palette = Palette::default();
         let cases = [
             (
                 "7f_landscape",
@@ -368,16 +364,15 @@ mod tests {
             let image = blocks
                 .iter()
                 .find_map(|b| match b {
-                    ContentBlock::Image {
-                        height,
-                        failed,
-                        ..
-                    } => Some((*height, *failed)),
+                    ContentBlock::Image { height, failed, .. } => Some((*height, *failed)),
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("{name} missing image block"));
             assert!(!image.1, "{name} should not be failed");
-            assert!(image.0 > 4, "{name} ready image should exceed loading placeholder");
+            assert!(
+                image.0 > 4,
+                "{name} ready image should exceed loading placeholder"
+            );
         }
     }
 }

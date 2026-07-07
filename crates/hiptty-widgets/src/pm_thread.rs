@@ -86,7 +86,7 @@ fn draw_pm_message(
     let bar_style = if is_mine {
         palette.accent_style()
     } else {
-        palette.dim_style()
+        palette.muted_style()
     };
     let bar = Rect {
         x: area.x,
@@ -109,11 +109,7 @@ fn draw_pm_message(
         .map(format_relative_time)
         .unwrap_or_default();
     let header = format!("{author}  {time}");
-    let text = msg
-        .title
-        .as_deref()
-        .or(msg.info.as_deref())
-        .unwrap_or("");
+    let text = msg.title.as_deref().or(msg.info.as_deref()).unwrap_or("");
     let plain = strip_html_tags(text);
     let width = body.width.saturating_sub(1) as usize;
     let header = truncate_str(&header, width);
@@ -129,7 +125,10 @@ fn draw_pm_message(
         lines.push(Line::from(Span::styled(header, header_style)));
     }
     if intra_skip <= 1 {
-        lines.push(Line::from(Span::styled(body_text, palette.primary_style())));
+        lines.push(Line::from(Span::styled(
+            body_text,
+            palette.foreground_style(),
+        )));
     }
     if !lines.is_empty() {
         frame.render_widget(Paragraph::new(lines), body);

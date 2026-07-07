@@ -150,7 +150,7 @@ pub fn draw_login(frame: &mut Frame<'_>, area: Rect, props: LoginFormProps<'_>) 
 
     frame.render_widget(
         Paragraph::new("Tab / ↑↓ 切换字段 · Enter 确认 · Esc 退出")
-            .style(props.palette.dim_style())
+            .style(props.palette.muted_style())
             .alignment(Alignment::Center),
         chunks[9],
     );
@@ -212,19 +212,19 @@ fn draw_text_input(
     let display = truncate_str(row.value, INPUT_COL_WIDTH as usize);
 
     let value_style = if row.disabled {
-        palette.dim_style()
+        palette.muted_style()
     } else if row.focused {
         palette.accent_style().add_modifier(Modifier::BOLD)
     } else {
-        palette.primary_style()
+        palette.foreground_style()
     };
 
     let underline_style = if row.disabled {
-        palette.dim_style()
+        palette.muted_style()
     } else if row.focused {
         palette.accent_style()
     } else {
-        palette.dim_style()
+        palette.muted_style()
     };
 
     let empty_input = row.value.is_empty();
@@ -267,17 +267,17 @@ fn draw_security_picker(
     let arrow_style = if focused {
         palette.accent_style()
     } else {
-        palette.dim_style()
+        palette.muted_style()
     };
     let text_style = if focused {
         palette.accent_style().add_modifier(Modifier::BOLD)
     } else {
-        palette.primary_style()
+        palette.foreground_style()
     };
     let underline_style = if focused {
         palette.accent_style()
     } else {
-        palette.dim_style()
+        palette.muted_style()
     };
 
     let q_trunc = truncate_str(question, INPUT_COL_WIDTH.saturating_sub(4) as usize);
@@ -350,7 +350,7 @@ fn draw_submit_button(
     let style = if focused {
         palette.accent_style().add_modifier(Modifier::BOLD)
     } else {
-        palette.primary_style()
+        palette.foreground_style()
     };
 
     frame.render_widget(

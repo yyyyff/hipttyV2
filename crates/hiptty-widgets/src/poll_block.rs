@@ -106,15 +106,12 @@ pub fn draw_poll_block(
             let style = if idx == 0 {
                 palette.accent_style()
             } else {
-                palette.primary_style()
+                palette.foreground_style()
             };
             draw_row(
                 frame,
                 y,
-                Paragraph::new(Line::from(vec![
-                    Span::raw("│ "),
-                    Span::styled(line, style),
-                ])),
+                Paragraph::new(Line::from(vec![Span::raw("│ "), Span::styled(line, style)])),
             );
             y += 1;
         }
@@ -141,7 +138,7 @@ pub fn draw_poll_block(
         draw_row(
             frame,
             y,
-            Paragraph::new(bottom).style(palette.dim_style()),
+            Paragraph::new(bottom).style(palette.muted_style()),
         );
     }
 }

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, mpsc::{self, Receiver, Sender}};
+use std::sync::{
+    mpsc::{self, Receiver, Sender},
+    Arc,
+};
 use std::thread;
 
 use hiptty_render::is_windows_terminal;
@@ -365,9 +368,11 @@ fn build_draw(
             SlicedProtocol::new_with_resize(&decode_picker, (*pixels).clone(), size, resize)?,
         ))),
         // Smileys are always one row tall and never partially scrolled.
-        ImageKind::Smiley => Ok(ReadyDraw::Full(
-            decode_picker.new_protocol((*pixels).clone(), size, resize)?,
-        )),
+        ImageKind::Smiley => Ok(ReadyDraw::Full(decode_picker.new_protocol(
+            (*pixels).clone(),
+            size,
+            resize,
+        )?)),
     }
 }
 
@@ -381,12 +386,9 @@ fn decode_image(
     let size = match kind {
         ImageKind::Avatar => avatar_cell_size(),
         ImageKind::Smiley => smiley_cell_size(),
-        ImageKind::Content { max_cols } => content_image_cell_size(
-            &decode_picker,
-            dyn_img.width(),
-            dyn_img.height(),
-            max_cols,
-        ),
+        ImageKind::Content { max_cols } => {
+            content_image_cell_size(&decode_picker, dyn_img.width(), dyn_img.height(), max_cols)
+        }
     };
     // Avatars always occupy the full layout slot. `Resize::Fit` skips upscaling when the
     // source already fits inside the target at a smaller natural size — pre-resize to the
@@ -468,10 +470,7 @@ mod tests {
     fn failed_content_image_is_rerequested() {
         let mut cache = ImageCache::new(Picker::halfblocks(), None);
         let url = "http://example.com/post.jpg".to_string();
-        cache.request(
-            url.clone(),
-            ImageKind::Content { max_cols: 40 },
-        );
+        cache.request(url.clone(), ImageKind::Content { max_cols: 40 });
         cache.mark_failed(&url);
         assert!(cache.request(url.clone(), ImageKind::Content { max_cols: 40 }));
         assert!(matches!(

@@ -23,11 +23,7 @@ pub fn post_image_jobs(post: &Post, content_width: u16) -> Vec<FetchRequest> {
     out
 }
 
-pub fn prefetch_post(
-    cache: &mut ImageCache,
-    post: &Post,
-    content_width: u16,
-) -> Vec<FetchRequest> {
+pub fn prefetch_post(cache: &mut ImageCache, post: &Post, content_width: u16) -> Vec<FetchRequest> {
     prefetch_post_smileys(cache, post);
     post_image_jobs(post, content_width)
         .into_iter()

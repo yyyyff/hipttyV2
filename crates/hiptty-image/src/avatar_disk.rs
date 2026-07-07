@@ -98,7 +98,8 @@ mod tests {
 
     #[test]
     fn cache_file_name_from_avatar_url() {
-        let url = "https://img02.4d4y.com/uc_server/data/avatar/000/40/54/01/405451_avatar_middle.jpg";
+        let url =
+            "https://img02.4d4y.com/uc_server/data/avatar/000/40/54/01/405451_avatar_middle.jpg";
         assert_eq!(
             AvatarDiskCache::cache_file_name(url),
             Some("000_40_54_01_405451_avatar_middle.jpg".into())

@@ -1,8 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use hiptty_core::{
-    list_item_to_thread_summary, AdapterError, ErrorCode, ListItem, Theme,
-    ThreadSummary,
-};
+use hiptty_core::{list_item_to_thread_summary, AdapterError, ErrorCode, ListItem, ThreadSummary};
 use hiptty_widgets::MAIN_MENU_ITEMS;
 use tokio::sync::mpsc;
 
@@ -47,16 +44,13 @@ pub fn handle_global_key(
             }
             true
         }
-        KeyCode::Char('/') if matches!(
-            app.page,
-            Page::ThreadFeed | Page::Search
-        ) =>
-        {
+        KeyCode::Char('/') if matches!(app.page, Page::ThreadFeed | Page::Search) => {
             app.overlay_state.search_input = app.list_page.search_query.clone();
             app.overlay = Overlay::SearchPrompt;
             true
         }
-        KeyCode::Char('b') if !matches!(app.page, Page::ThreadFeed | Page::Login | Page::Startup) =>
+        KeyCode::Char('b')
+            if !matches!(app.page, Page::ThreadFeed | Page::Login | Page::Startup) =>
         {
             navigate_back(app);
             true
@@ -141,7 +135,7 @@ fn handle_settings_key(
     key: KeyEvent,
     _worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
-    const ROWS: usize = 5;
+    const ROWS: usize = 4;
     match key.code {
         KeyCode::Esc => app.overlay = Overlay::None,
         KeyCode::Char('j') | KeyCode::Down => {
@@ -154,16 +148,8 @@ fn handle_settings_key(
                 app.overlay_state.settings_selected.saturating_sub(1);
         }
         KeyCode::Enter => match app.overlay_state.settings_selected {
-            0 => {
-                app.settings.theme = match app.settings.theme {
-                    Theme::Dark => Theme::Light,
-                    Theme::Light => Theme::Dark,
-                };
-                let _ = crate::config::save_settings(&app.settings_path, &app.settings);
-                app.set_toast("主题已更新", false);
-            }
-            1..=3 => {
-                let idx = app.overlay_state.settings_selected - 1;
+            0..=2 => {
+                let idx = app.overlay_state.settings_selected;
                 let forums = hiptty_widgets::forum_picker_entries(&app.settings.default_forums);
                 let current = app.settings.default_forums[idx];
                 let next = forums
@@ -175,7 +161,7 @@ fn handle_settings_key(
                 let _ = crate::config::save_settings(&app.settings_path, &app.settings);
                 app.set_toast("默认版块已更新", false);
             }
-            4 => app.set_toast("黑名单管理将在后续版本提供", false),
+            3 => app.set_toast("黑名单管理将在后续版本提供", false),
             _ => {}
         },
         _ => {}
@@ -252,7 +238,10 @@ pub fn handle_list_page_key(
             if let Some(item) = app.list_page.items.get(app.list_page.selected).cloned() {
                 if let Some(uid) = item.uid {
                     let _ = worker_tx.send(WorkerRequest::PmDelete { uid: uid.clone() });
-                    app.set_toast(format!("正在删除与 {} 的对话", item.author.unwrap_or_default()), false);
+                    app.set_toast(
+                        format!("正在删除与 {} 的对话", item.author.unwrap_or_default()),
+                        false,
+                    );
                 }
             }
         }
@@ -326,7 +315,8 @@ pub fn maybe_load_more_list(
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
     kind: ListPageKind,
 ) {
-    if app.list_page.loading || kind == ListPageKind::PmList || kind == ListPageKind::Notifications {
+    if app.list_page.loading || kind == ListPageKind::PmList || kind == ListPageKind::Notifications
+    {
         return;
     }
     let remaining = app
@@ -427,8 +417,19 @@ fn open_thread_from_item(
     let fid = item
         .forum
         .as_ref()
-        .and_then(|f| hiptty_core::FORUMS.iter().find(|forum| forum.name == f).map(|f| f.id))
-        .or_else(|| if kind == Some(ListPageKind::Search) { Some(app.feed.fid) } else { None });
+        .and_then(|f| {
+            hiptty_core::FORUMS
+                .iter()
+                .find(|forum| forum.name == f)
+                .map(|f| f.id)
+        })
+        .or_else(|| {
+            if kind == Some(ListPageKind::Search) {
+                Some(app.feed.fid)
+            } else {
+                None
+            }
+        });
     open_thread_summary(app, worker_tx, list_item_to_thread_summary(item), fid);
 }
 
@@ -607,10 +608,12 @@ fn prefetch_list_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
         .items
         .iter()
         .filter_map(|item| {
-            item.avatar_url.as_ref().map(|url| hiptty_image::FetchRequest {
-                url: url.clone(),
-                kind: hiptty_image::ImageKind::Avatar,
-            })
+            item.avatar_url
+                .as_ref()
+                .map(|url| hiptty_image::FetchRequest {
+                    url: url.clone(),
+                    kind: hiptty_image::ImageKind::Avatar,
+                })
         })
         .collect();
     crate::event::enqueue_image_jobs(app, jobs, worker_tx);
@@ -619,4 +622,3 @@ fn prefetch_list_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
 fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
 }
-

@@ -1,5 +1,5 @@
-use ratatui::text::{Line, Span};
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 
 use crate::text::str_width;
 
@@ -64,7 +64,13 @@ pub fn wrap_segments(segments: &[StyledSegment], max_cols: usize) -> Vec<Line<'s
 }
 
 pub fn wrap_plain(text: &str, max_cols: usize, style: Style) -> Vec<Line<'static>> {
-    wrap_segments(&[StyledSegment { text: text.to_string(), style }], max_cols)
+    wrap_segments(
+        &[StyledSegment {
+            text: text.to_string(),
+            style,
+        }],
+        max_cols,
+    )
 }
 
 pub fn pad_line_left(line: Line<'static>, width: usize) -> Line<'static> {

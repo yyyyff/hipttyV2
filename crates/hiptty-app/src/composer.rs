@@ -98,7 +98,9 @@ pub struct ConfirmDeleteState {
 }
 
 pub fn reply_thread_action(tid: &str) -> PostAction {
-    PostAction::ReplyThread { tid: tid.to_string() }
+    PostAction::ReplyThread {
+        tid: tid.to_string(),
+    }
 }
 
 pub fn quote_post_action(tid: &str, pid: &str) -> PostAction {

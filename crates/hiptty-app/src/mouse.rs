@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use hiptty_widgets::{
     apply_scroll_delta, clamp_scroll_top, clamp_thread_scroll_lines, item_index_at_row,
-    list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows, SIMPLE_ITEM_HEIGHT,
-    WHEEL_LINES, ITEM_HEIGHT, PM_ITEM_HEIGHT,
+    list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows, ITEM_HEIGHT, PM_ITEM_HEIGHT,
+    SIMPLE_ITEM_HEIGHT, WHEEL_LINES,
 };
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -18,7 +18,11 @@ use crate::worker::WorkerRequest;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
-pub fn handle_mouse(app: &mut App, event: MouseEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn handle_mouse(
+    app: &mut App,
+    event: MouseEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
     if app.overlay != Overlay::None && app.overlay != Overlay::ForumPicker {
         return;
     }
@@ -83,8 +87,12 @@ fn current_scroll_offset(app: &App) -> u16 {
     match app.page {
         Page::ThreadFeed => app.feed.scroll_lines,
         Page::ThreadDetail => app.detail.scroll_top,
-        Page::PmList | Page::Notifications | Page::Search | Page::MyThreads
-        | Page::MyReplies | Page::Favorites => app.list_page.scroll_lines,
+        Page::PmList
+        | Page::Notifications
+        | Page::Search
+        | Page::MyThreads
+        | Page::MyReplies
+        | Page::Favorites => app.list_page.scroll_lines,
         Page::PmThread => app.pm_thread.scroll_lines,
         _ => 0,
     }
@@ -157,19 +165,17 @@ fn apply_scroll_offset(
                 let viewport = app.scroll_viewport_height();
                 let palette = app.palette();
                 let images = app.images();
-                app.detail.scroll_top = clamp_scroll_top(
-                    offset,
-                    &detail.posts,
-                    width,
-                    viewport,
-                    palette,
-                    images,
-                );
+                app.detail.scroll_top =
+                    clamp_scroll_top(offset, &detail.posts, width, viewport, palette, images);
                 maybe_load_more_detail(app, worker_tx);
             }
         }
-        Page::PmList | Page::Notifications | Page::Search | Page::MyThreads
-        | Page::MyReplies | Page::Favorites => {
+        Page::PmList
+        | Page::Notifications
+        | Page::Search
+        | Page::MyThreads
+        | Page::MyReplies
+        | Page::Favorites => {
             let item_h = list_item_height(app.page);
             let max = max_scroll_lines(
                 list_content_lines(app.list_page.items.len(), item_h),

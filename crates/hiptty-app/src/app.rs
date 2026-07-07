@@ -2,12 +2,12 @@ use hiptty_core::{
     forum_name, processed_password, AppSettings, SessionInfo, StoredCredentials, ThreadDetail,
     ThreadSummary, SECURITY_QUESTIONS,
 };
-use hiptty_render::{format_count, Palette};
 use hiptty_image::{AvatarDiskCache, FetchRequest, ImageCache};
+use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
-    clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets,
-    forum_picker_entries, snap_scroll_to_item, thread_list_capacity, LoginField,
-    ScrollBarInteraction, ScrollChrome, TitleBarHits, SCROLLBAR_COLS,
+    clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets, forum_picker_entries,
+    snap_scroll_to_item, thread_list_capacity, LoginField, ScrollBarInteraction, ScrollChrome,
+    TitleBarHits, SCROLLBAR_COLS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -300,7 +300,7 @@ impl App {
     }
 
     pub fn palette(&self) -> Palette {
-        Palette::for_theme(self.settings.theme)
+        Palette::default()
     }
 
     pub fn breadcrumb(&self) -> String {
@@ -421,12 +421,8 @@ impl App {
     pub fn sync_feed_scroll(&mut self) {
         let item_h = hiptty_widgets::ITEM_HEIGHT;
         let viewport = self.scroll_viewport_height();
-        self.feed.scroll_lines = snap_scroll_to_item(
-            self.feed.selected,
-            self.feed.scroll_lines,
-            viewport,
-            item_h,
-        );
+        self.feed.scroll_lines =
+            snap_scroll_to_item(self.feed.selected, self.feed.scroll_lines, viewport, item_h);
     }
 
     /// Keep the top visible floor anchored after layout changes (append, image measure).
@@ -450,14 +446,8 @@ impl App {
         );
         let offsets = floor_offsets(&detail.posts, width, palette, images);
         let anchored = offsets.get(anchor).copied().unwrap_or(0);
-        self.detail.scroll_top = clamp_scroll_top(
-            anchored,
-            &detail.posts,
-            width,
-            viewport,
-            palette,
-            images,
-        );
+        self.detail.scroll_top =
+            clamp_scroll_top(anchored, &detail.posts, width, viewport, palette, images);
     }
 
     /// Content width below title/status, reserving the scrollbar column when possible.
@@ -476,11 +466,7 @@ impl App {
     }
 
     pub fn detail_breadcrumb(&self) -> String {
-        let forum = self
-            .detail
-            .fid
-            .and_then(forum_name)
-            .unwrap_or("Forum");
+        let forum = self.detail.fid.and_then(forum_name).unwrap_or("Forum");
         let title = hiptty_render::display_title(&self.detail.title);
         format!("{forum} > {title}")
     }

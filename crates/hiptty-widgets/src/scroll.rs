@@ -1,9 +1,9 @@
 use hiptty_render::Palette;
+use ratatui::widgets::Widget;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     Frame,
 };
-use ratatui::widgets::Widget;
 use tui_scrollbar::{GlyphSet, ScrollLengths, TrackClickBehavior};
 
 /// Lines moved per mouse wheel tick (smooth scroll, not j/k steps).
@@ -15,11 +15,8 @@ pub fn split_content_scrollbar(area: Rect) -> (Rect, Rect) {
     if area.width <= SCROLLBAR_COLS || area.height == 0 {
         return (area, Rect::default());
     }
-    let chunks = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(SCROLLBAR_COLS),
-    ])
-    .split(area);
+    let chunks =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(SCROLLBAR_COLS)]).split(area);
     (chunks[0], chunks[1])
 }
 
@@ -72,8 +69,7 @@ pub fn align_scroll_to_item_top(scroll_lines: u16, item_height: u16) -> u16 {
     if item_height == 0 {
         return scroll_lines;
     }
-    scroll_lines
-        .saturating_sub(scroll_lines % item_height)
+    scroll_lines.saturating_sub(scroll_lines % item_height)
 }
 
 fn selected_item_visible(
@@ -169,7 +165,7 @@ pub fn draw_vertical_scrollbar(
         .track_click_behavior(TrackClickBehavior::JumpToClick)
         .offset(offset as usize)
         .scroll_step(1)
-        .track_style(palette.dim_style())
+        .track_style(palette.muted_style())
         .thumb_style(palette.secondary_style())
         .glyph_set(GlyphSet::unicode());
     scrollbar.render(bar_area, frame.buffer_mut());

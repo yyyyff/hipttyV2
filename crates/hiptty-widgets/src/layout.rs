@@ -10,7 +10,7 @@ pub fn draw_dim_rule(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
         return;
     }
     let line = "─".repeat(area.width as usize);
-    frame.render_widget(Paragraph::new(line).style(palette.dim_style()), area);
+    frame.render_widget(Paragraph::new(line).style(palette.muted_style()), area);
 }
 
 /// Title (2) · rule · content · rule · status (1)

@@ -2,18 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::forum::DEFAULT_FORUM_IDS;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Theme {
-    #[default]
-    Dark,
-    Light,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
-    #[serde(default)]
-    pub theme: Theme,
     #[serde(default = "default_forums")]
     pub default_forums: [u32; 3],
 }
@@ -29,7 +19,6 @@ fn default_forums() -> [u32; 3] {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            theme: Theme::default(),
             default_forums: default_forums(),
         }
     }

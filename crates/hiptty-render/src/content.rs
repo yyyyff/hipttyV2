@@ -24,7 +24,11 @@ pub fn render_post_content_lines(post: &Post, width: u16, palette: Palette) -> V
             lines.push(Line::from(""));
         }
     }
-    while lines.last().map(|l| l.spans.iter().all(|s| s.content.is_empty())) == Some(true) {
+    while lines
+        .last()
+        .map(|l| l.spans.iter().all(|s| s.content.is_empty()))
+        == Some(true)
+    {
         lines.pop();
     }
     lines
@@ -43,10 +47,7 @@ pub fn render_content_node(
             text,
             ..
         } => render_quote(author.as_deref(), text, max_cols, palette),
-        ContentNode::Image { .. } => vec![Line::styled(
-            IMAGE_PLACEHOLDER,
-            palette.dim_style(),
-        )],
+        ContentNode::Image { .. } => vec![Line::styled(IMAGE_PLACEHOLDER, palette.muted_style())],
         ContentNode::Attachment { name, size, .. } => {
             let size_text = format_attachment_size(*size);
             let line = if size_text.is_empty() {
@@ -54,15 +55,15 @@ pub fn render_content_node(
             } else {
                 format!("\u{f0c6} {name} ({size_text})")
             };
-            vec![Line::styled(line, palette.primary_style())]
+            vec![Line::styled(line, palette.foreground_style())]
         }
         ContentNode::FloorRef { floor, author, .. } => {
             let author = author.as_deref().unwrap_or("?");
             let line = format!(">>> #{floor} @{author}");
-            vec![Line::styled(line, palette.accent_style())]
+            vec![Line::styled(line, palette.link_style())]
         }
         ContentNode::AppMark { text, .. } => {
-            vec![Line::styled(format!("▸ {text}"), palette.dim_style())]
+            vec![Line::styled(format!("▸ {text}"), palette.muted_style())]
         }
     }
 }
@@ -121,7 +122,7 @@ fn render_quote(
     lines.extend(wrap_plain(
         &header,
         body_w,
-        palette.accent_style().add_modifier(Modifier::BOLD),
+        palette.link_style().add_modifier(Modifier::BOLD),
     ));
     lines.extend(wrap_plain(text, body_w, palette.secondary_style()));
 
@@ -132,7 +133,7 @@ fn render_quote(
 }
 
 fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
-    let mut spans = vec![Span::styled("┃  ", palette.dim_style())];
+    let mut spans = vec![Span::styled("┃  ", palette.muted_style())];
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -140,9 +141,9 @@ fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
 use ratatui::text::Span;
 
 fn core_style_to_ratatui(style: &CoreStyle, palette: Palette) -> Style {
-    let mut out = palette.primary_style();
+    let mut out = palette.foreground_style();
     if let Some(fg) = style.fg.as_deref() {
-        if let Some(color) = parse_hex_color(fg).or(parse_named_color(fg)) {
+        if let Some(color) = parse_hex_color(fg).or(parse_named_color(fg, palette)) {
             out = out.fg(color);
         }
     }
@@ -155,18 +156,14 @@ fn core_style_to_ratatui(style: &CoreStyle, palette: Palette) -> Style {
     out
 }
 
-fn parse_named_color(name: &str) -> Option<ratatui::style::Color> {
+fn parse_named_color(name: &str, palette: Palette) -> Option<ratatui::style::Color> {
     match name.to_ascii_lowercase().as_str() {
-        "gray" | "grey" => Some(palette_dim_color()),
-        "red" => Some(ratatui::style::Color::Rgb(248, 113, 113)),
-        "blue" => Some(ratatui::style::Color::Rgb(96, 165, 250)),
-        "green" => Some(ratatui::style::Color::Rgb(74, 222, 128)),
+        "gray" | "grey" => Some(palette.muted),
+        "red" => Some(palette.error),
+        "blue" => Some(palette.link),
+        "green" => Some(palette.success),
         _ => None,
     }
-}
-
-fn palette_dim_color() -> ratatui::style::Color {
-    Palette::for_theme(hiptty_core::Theme::Dark).dim
 }
 
 fn format_attachment_size(size: Option<u64>) -> String {
@@ -203,13 +200,15 @@ pub fn floor_header_rows(
     let author_budget = width.saturating_sub(floor_w + 1);
     let author_text = truncate_str(author, author_budget);
 
-    let mut row1_spans = vec![Span::styled(author_text, palette.primary_style())];
+    let mut row1_spans = vec![Span::styled(author_text, palette.foreground_style())];
     let author_used: usize = row1_spans
         .iter()
         .map(|s| str_width(s.content.as_ref()))
         .sum();
     if author_used + floor_w < width {
-        row1_spans.push(Span::raw(" ".repeat(width.saturating_sub(author_used + floor_w))));
+        row1_spans.push(Span::raw(
+            " ".repeat(width.saturating_sub(author_used + floor_w)),
+        ));
     }
     row1_spans.push(Span::styled(
         floor_tag,
@@ -228,10 +227,7 @@ pub fn floor_header_rows(
 }
 
 pub fn signature_line(signature: &str, width: usize, palette: Palette) -> Line<'static> {
-    Line::styled(
-        format_signature(signature, width),
-        palette.dim_style(),
-    )
+    Line::styled(format_signature(signature, width), palette.muted_style())
 }
 
 #[cfg(test)]
@@ -249,7 +245,7 @@ mod tests {
             tid: None,
             reply_to: None,
         };
-        let lines = render_content_node(&node, 40, Palette::for_theme(hiptty_core::Theme::Dark));
+        let lines = render_content_node(&node, 40, Palette::default());
         assert!(!lines.is_empty());
         assert!(lines[0].spans[0].content.contains('┃'));
     }

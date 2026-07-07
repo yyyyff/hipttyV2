@@ -67,7 +67,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
     let mut idx = 0;
 
     let header_style = if props.loading {
-        props.palette.dim_style().add_modifier(Modifier::ITALIC)
+        props.palette.muted_style().add_modifier(Modifier::ITALIC)
     } else {
         props.palette.accent_style()
     };
@@ -84,7 +84,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
             if props.focus == ComposerFocus::Subject {
                 props.palette.accent_style()
             } else {
-                props.palette.primary_style()
+                props.palette.foreground_style()
             },
         );
         let cursor = if props.focus == ComposerFocus::Subject {
@@ -101,7 +101,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
 
     if let Some(path) = props.image_path {
         let prefix = Span::styled("图片路径  ", props.palette.secondary_style());
-        let path_span = Span::styled(path, props.palette.primary_style());
+        let path_span = Span::styled(path, props.palette.foreground_style());
         let cursor = Span::styled("█", props.palette.accent_style());
         frame.render_widget(
             Paragraph::new(Line::from(vec![prefix, path_span, cursor])),
@@ -120,14 +120,14 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(props.palette.dim_style())
+        .border_style(props.palette.muted_style())
         .title(Span::styled(
             if props.loading {
                 "准备中..."
             } else {
                 "Ctrl+S 发送  Esc 取消  Ctrl+I 插图"
             },
-            props.palette.dim_style(),
+            props.palette.muted_style(),
         ));
     let textarea_area = chunks[idx];
     let inner = block.inner(textarea_area);
@@ -144,7 +144,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
             "Tab 切换标题"
         };
         frame.render_widget(
-            Paragraph::new(hint).style(props.palette.dim_style()),
+            Paragraph::new(hint).style(props.palette.muted_style()),
             chunks[idx],
         );
     }
@@ -175,13 +175,9 @@ pub fn draw_confirm_dialog(frame: &mut Frame<'_>, area: Rect, props: ConfirmProp
         .title(props.title);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
-    let chunks = Layout::vertical([
-        Constraint::Min(2),
-        Constraint::Length(1),
-    ])
-    .split(inner);
+    let chunks = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).split(inner);
     frame.render_widget(
-        Paragraph::new(props.message).style(props.palette.primary_style()),
+        Paragraph::new(props.message).style(props.palette.foreground_style()),
         chunks[0],
     );
     let actions = if props.loading {

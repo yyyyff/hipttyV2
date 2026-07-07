@@ -30,7 +30,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(props.palette.dim_style())
+        .border_style(props.palette.muted_style())
         .title(" 切换版块 ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -42,7 +42,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
     ))));
     items.push(ListItem::new(Line::from(Span::styled(
         "──────────",
-        props.palette.dim_style(),
+        props.palette.muted_style(),
     ))));
 
     let mut idx = 0;
@@ -57,7 +57,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
         let style = if selected {
             props.palette.selected_style()
         } else {
-            props.palette.primary_style()
+            props.palette.foreground_style()
         };
         items.push(ListItem::new(Line::from(Span::styled(
             format!("{marker}{name}"),
@@ -73,7 +73,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
     ))));
     items.push(ListItem::new(Line::from(Span::styled(
         "──────────",
-        props.palette.dim_style(),
+        props.palette.muted_style(),
     ))));
 
     for forum in FORUMS {
@@ -84,7 +84,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
         let style = if selected {
             props.palette.selected_style()
         } else {
-            props.palette.primary_style()
+            props.palette.foreground_style()
         };
         items.push(ListItem::new(Line::from(Span::styled(
             format!("  {}", forum.name),
@@ -112,7 +112,7 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
     };
     frame.render_widget(
         Paragraph::new("j/k 移动  Enter 切换  Esc 关闭")
-            .style(props.palette.dim_style())
+            .style(props.palette.muted_style())
             .alignment(Alignment::Center),
         footer,
     );

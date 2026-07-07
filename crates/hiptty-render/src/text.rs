@@ -75,7 +75,9 @@ fn parse_forum_datetime(raw: &str) -> Option<DateTime<Local>> {
 
 /// Discuz often uses single-digit month/day, e.g. `2026-3-10 15:33`.
 fn parse_flexible_forum_datetime(raw: &str) -> Option<DateTime<Local>> {
-    let (date_part, time_part) = raw.split_once(' ').map_or((raw, None), |(d, t)| (d, Some(t)));
+    let (date_part, time_part) = raw
+        .split_once(' ')
+        .map_or((raw, None), |(d, t)| (d, Some(t)));
     let mut date_bits = date_part.split('-');
     let year: i32 = date_bits.next()?.parse().ok()?;
     let month: u32 = date_bits.next()?.parse().ok()?;
@@ -153,14 +155,8 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-07-01T18:00:00+08:00")
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(
-            format_relative_time_at("2026-7-1 17:00", now),
-            "1小时前"
-        );
-        assert_eq!(
-            format_relative_time_at("2026-6-24 15:53", now),
-            "1周前"
-        );
+        assert_eq!(format_relative_time_at("2026-7-1 17:00", now), "1小时前");
+        assert_eq!(format_relative_time_at("2026-6-24 15:53", now), "1周前");
     }
 
     #[test]

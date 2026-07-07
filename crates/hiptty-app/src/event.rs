@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui_textarea::{Input as TextareaInput, Key as TextareaKey};
 use hiptty_core::{AdapterError, ErrorCode, PostAction};
 use hiptty_widgets::{ComposerFocus, LoginField};
+use ratatui_textarea::{Input as TextareaInput, Key as TextareaKey};
 use tokio::sync::mpsc;
 
 use hiptty_image::thread_avatar_job;
@@ -543,7 +543,11 @@ pub fn handle_worker_response(
                 }
             }
         },
-        WorkerResponse::ThreadDetailLoaded { tid, page: _, result } => {
+        WorkerResponse::ThreadDetailLoaded {
+            tid,
+            page: _,
+            result,
+        } => {
             if app.detail.tid != tid {
                 return;
             }
@@ -688,14 +692,7 @@ pub fn handle_worker_response(
                     app.composer = None;
                     app.confirm_delete = None;
                     app.toast = Some(post_result.message.clone());
-                    apply_post_success(
-                        app,
-                        &action,
-                        delete,
-                        post_result,
-                        worker_tx,
-                        new_subject,
-                    );
+                    apply_post_success(app, &action, delete, post_result, worker_tx, new_subject);
                 }
                 Ok(post_result) => {
                     app.toast = Some(post_result.message);
@@ -943,7 +940,7 @@ fn cycle_composer_focus(app: &mut App, reverse: bool) {
         (ComposerFocus::Body, false) => ComposerFocus::Subject,
         (ComposerFocus::Body, true) => ComposerFocus::Subject,
         (ComposerFocus::Subject, true) => ComposerFocus::Body,
-        (ComposerFocus::ImagePath, _,) => ComposerFocus::Body,
+        (ComposerFocus::ImagePath, _) => ComposerFocus::Body,
     };
 }
 

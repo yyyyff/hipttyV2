@@ -134,7 +134,7 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
         row2_cols[0].width.saturating_sub(1) as usize,
     );
     frame.render_widget(
-        Paragraph::new(breadcrumb).style(props.palette.primary_style()),
+        Paragraph::new(breadcrumb).style(props.palette.foreground_style()),
         row2_cols[0],
     );
 

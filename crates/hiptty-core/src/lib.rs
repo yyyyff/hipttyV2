@@ -25,6 +25,6 @@ pub use post::{PostAction, PostResult, PrePostInfo};
 pub use search::SearchQuery;
 pub use security::{security_question_label, SECURITY_QUESTIONS};
 pub use session::{Credentials, SessionInfo};
-pub use settings::{AppSettings, StoredCredentials, Theme};
+pub use settings::{AppSettings, StoredCredentials};
 pub use thread::{Post, ThreadDetail, ThreadList, ThreadSummary};
 pub use user::UserInfo;

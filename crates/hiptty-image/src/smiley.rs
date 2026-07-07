@@ -7,11 +7,7 @@ use crate::cache::{ImageCache, ImageKind};
 struct EmojiAssets;
 
 /// Stable cache key for a forum smiley. Prefer parsed `code` (e.g. `default_lol`).
-pub fn smiley_cache_key(
-    code: Option<&str>,
-    smilie_id: Option<&str>,
-    url: &str,
-) -> String {
+pub fn smiley_cache_key(code: Option<&str>, smilie_id: Option<&str>, url: &str) -> String {
     if let Some(code) = code.filter(|c| !c.is_empty()) {
         return format!("smiley:{code}");
     }
@@ -79,11 +75,7 @@ fn collect_smiley_keys(node: &hiptty_core::ContentNode, cache: &mut ImageCache) 
             smilie_id,
         } = span
         {
-            let key = smiley_cache_key(
-                code.as_deref(),
-                smilie_id.as_deref(),
-                url,
-            );
+            let key = smiley_cache_key(code.as_deref(), smilie_id.as_deref(), url);
             let _ = prefetch_smiley(cache, key);
         }
     }

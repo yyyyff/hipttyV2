@@ -357,10 +357,17 @@ fn draw_floor(
         height: area.height,
     };
     let text_x = body.x + if show_avatar { AVATAR_W } else { 0 };
-    let text_w = body.width.saturating_sub(if show_avatar { AVATAR_W } else { 0 });
+    let text_w = body
+        .width
+        .saturating_sub(if show_avatar { AVATAR_W } else { 0 });
 
-    let (mut row1, row2) =
-        floor_header_rows(&post.author, post.floor, &post.time, text_w as usize, palette);
+    let (mut row1, row2) = floor_header_rows(
+        &post.author,
+        post.floor,
+        &post.time,
+        text_w as usize,
+        palette,
+    );
     if post.warned {
         row1.spans.insert(
             0,
@@ -396,7 +403,7 @@ fn draw_floor(
                 return false;
             }
             if draw_bar {
-                draw_bar_if_selected(frame, area.x, *y, selected, palette);
+                draw_nav_bar(frame, area.x, *y, selected, palette);
             }
             *y += 1;
             *line_idx += 1;
@@ -483,7 +490,7 @@ fn draw_floor(
                     .min(area.y + area.height - y);
                 if poll_visible > 0 && line_idx >= skip_lines {
                     for row in 0..poll_visible {
-                        draw_bar_if_selected(frame, area.x, y + row, selected, palette);
+                        draw_nav_bar(frame, area.x, y + row, selected, palette);
                     }
                     draw_poll_block(
                         frame,
@@ -523,7 +530,12 @@ fn draw_floor(
                     },
                 );
             }
-            ContentBlock::Image { url, width, height, failed } => {
+            ContentBlock::Image {
+                url,
+                width,
+                height,
+                failed,
+            } => {
                 if render_image_block(
                     frame,
                     viewport,
@@ -548,7 +560,12 @@ fn draw_floor(
                     break 'content;
                 }
             }
-            ContentBlock::Smiley { key, width, height, failed } => {
+            ContentBlock::Smiley {
+                key,
+                width,
+                height,
+                failed,
+            } => {
                 if render_image_block(
                     frame,
                     viewport,
@@ -578,7 +595,7 @@ fn draw_floor(
     if next_visible_row(frame, &mut y, &mut line_idx, false) {
         let rule = "─".repeat(body.width as usize);
         frame.render_widget(
-            Paragraph::new(rule).style(palette.dim_style()),
+            Paragraph::new(rule).style(palette.muted_style()),
             Rect {
                 x: body.x,
                 y: y - 1,
@@ -641,7 +658,7 @@ fn render_image_block(
         let slice_skip = line_idx.saturating_sub(block_start);
         let rows_in_view = height.saturating_sub(slice_skip).min(remaining_h);
         for row in 0..rows_in_view {
-            draw_bar_if_selected(frame, area.x, *y + row, selected, palette);
+            draw_nav_bar(frame, area.x, *y + row, selected, palette);
         }
         let fail_label = if failed { IMAGE_FAIL_LABEL } else { "…" };
         if let Some(cache) = images.as_deref() {
@@ -672,11 +689,7 @@ fn draw_meta_row2(
     signature: Option<&str>,
     palette: Palette,
 ) {
-    let time_text: String = time_line
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
+    let time_text: String = time_line.spans.iter().map(|s| s.content.as_ref()).collect();
     let time_w = str_width(&time_text);
 
     let sig = signature
@@ -713,18 +726,20 @@ fn draw_meta_row2(
     frame.render_widget(Paragraph::new(time_line.clone()), time_area);
     frame.render_widget(
         Paragraph::new(sig)
-            .style(palette.dim_style())
+            .style(palette.muted_style())
             .alignment(Alignment::Right),
         sig_area,
     );
 }
 
-fn draw_bar_if_selected(frame: &mut Frame<'_>, x: u16, y: u16, selected: bool, palette: Palette) {
-    if !selected {
-        return;
-    }
+fn draw_nav_bar(frame: &mut Frame<'_>, x: u16, y: u16, selected: bool, palette: Palette) {
+    let style = if selected {
+        palette.accent_style()
+    } else {
+        palette.muted_style()
+    };
     frame.render_widget(
-        Paragraph::new("│").style(palette.accent_style()),
+        Paragraph::new("│").style(style),
         Rect {
             x,
             y,
@@ -764,7 +779,7 @@ mod tests {
     #[test]
     fn floor_includes_gap_row() {
         let post = sample_post();
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let h = measure_floor(&post, 80, palette, None);
         let without_gap = HEADER_H + SEPARATOR_H + 1;
         assert!(h > without_gap);
@@ -773,7 +788,7 @@ mod tests {
     #[test]
     fn scroll_down_minimal() {
         let posts = vec![sample_post(); 6];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let h = measure_floor(&posts[0], 80, palette, None);
         let viewport = h * 4;
         let scroll = ensure_scroll_top(4, 0, &posts, 80, viewport, palette, None);
@@ -791,7 +806,7 @@ mod tests {
             }],
         }];
         let posts = vec![post];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let viewport = 10u16;
         let mid = ensure_scroll_top(0, 5, &posts, 80, viewport, palette, None);
         let again = ensure_scroll_top(0, mid, &posts, 80, viewport, palette, None);
@@ -801,7 +816,7 @@ mod tests {
     #[test]
     fn page_down_advances_by_visible_floors() {
         let posts = vec![sample_post(); 8];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let h = measure_floor(&posts[0], 80, palette, None);
         let viewport = h * 4;
         let next = page_scroll_top(0, 1, &posts, 80, viewport, palette, None);
@@ -811,7 +826,7 @@ mod tests {
     #[test]
     fn detail_step_down_scrolls_half_viewport() {
         let posts = vec![sample_post(); 8];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None);
         let viewport = floor_h.saturating_mul(3);
         let half = (viewport / 2).max(1);
@@ -823,8 +838,8 @@ mod tests {
         let (_sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
         assert_eq!(scroll, half);
 
-        let max_scroll = floor_list_total_height(&posts, 80, palette, None)
-            .saturating_sub(viewport);
+        let max_scroll =
+            floor_list_total_height(&posts, 80, palette, None).saturating_sub(viewport);
         let (sel, scroll) = detail_step_down(2, max_scroll, &posts, 80, viewport, palette, None);
         assert_eq!(sel, 2);
         assert_eq!(scroll, max_scroll);
@@ -833,7 +848,7 @@ mod tests {
     #[test]
     fn detail_step_up_scrolls_half_viewport() {
         let posts = vec![sample_post(); 4];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let viewport = 20u16;
         let half = (viewport / 2).max(1);
         let (sel, scroll) = detail_step_up(2, 10, &posts, 80, viewport, palette, None);
@@ -848,11 +863,14 @@ mod tests {
     #[test]
     fn last_visible_floor_tracks_viewport_bottom() {
         let posts = vec![sample_post(); 6];
-        let palette = Palette::for_theme(hiptty_core::Theme::Dark);
+        let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None);
         let viewport = floor_h.saturating_mul(2);
         let scroll = floor_h.saturating_mul(3);
         let last = last_visible_floor(scroll, &posts, 80, viewport, palette, None);
-        assert!(last >= 3, "last visible should be near viewport bottom, got {last}");
+        assert!(
+            last >= 3,
+            "last visible should be near viewport bottom, got {last}"
+        );
     }
 }

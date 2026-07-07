@@ -11,7 +11,7 @@ const LOGIN_LOGO: [&str; 2] = ["█░█ █  █▀█ █▀▄ █▀█", "
 
 pub fn draw_login_logo(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
     let hi = Style::default().fg(palette.logo_hi);
-    let pda = Style::default().fg(palette.logo_pda);
+    let pda = Style::default().fg(palette.logo_lo);
     let lines: Vec<Line> = LOGIN_LOGO
         .iter()
         .map(|row| {

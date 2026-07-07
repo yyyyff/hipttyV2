@@ -430,7 +430,11 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert!(!imgs.is_empty(), "floor {floor} should have inline images: {:?}", post.content);
+            assert!(
+                !imgs.is_empty(),
+                "floor {floor} should have inline images: {:?}",
+                post.content
+            );
             for (url, thumb) in &imgs {
                 assert!(
                     url.contains("img02.4d4y.com"),
@@ -457,7 +461,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(!img_urls.is_empty(), "expected attachment images on first floor");
+        assert!(
+            !img_urls.is_empty(),
+            "expected attachment images on first floor"
+        );
         assert!(
             img_urls.iter().any(|url| url.contains(".jpg")),
             "expected jpg attachment urls, got {img_urls:?}"

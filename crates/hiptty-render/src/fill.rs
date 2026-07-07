@@ -1,10 +1,4 @@
-use ratatui::{
-    layout::Rect,
-    style::Color,
-    text::Line,
-    widgets::Paragraph,
-    Frame,
-};
+use ratatui::{layout::Rect, style::Color, text::Line, widgets::Paragraph, Frame};
 
 use crate::terminal::clear_terminal_placements_in_area;
 

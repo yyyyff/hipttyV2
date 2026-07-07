@@ -1,75 +1,57 @@
-use hiptty_core::Theme;
 use ratatui::style::{Color, Modifier, Style};
 
-#[derive(Debug, Clone, Copy)]
+/// Synthwave-inspired neon palette for dark terminals (no app-drawn background).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    pub primary: Color,
+    pub foreground: Color,
     pub secondary: Color,
+    pub muted: Color,
     pub accent: Color,
+    pub link: Color,
+    pub success: Color,
     pub warn: Color,
     pub error: Color,
-    pub quote_bg: Color,
-    pub dim: Color,
     pub logo_hi: Color,
-    pub logo_pda: Color,
+    pub logo_lo: Color,
 }
 
 impl Palette {
-    pub fn for_theme(theme: Theme) -> Self {
-        match theme {
-            Theme::Dark => Self {
-                primary: Color::Rgb(212, 212, 216),
-                secondary: Color::Rgb(161, 161, 170),
-                accent: Color::Rgb(129, 140, 248),
-                warn: Color::Rgb(251, 191, 36),
-                error: Color::Rgb(248, 113, 113),
-                quote_bg: Color::Rgb(63, 63, 70),
-                dim: Color::Rgb(113, 113, 122),
-                logo_hi: Color::Rgb(167, 139, 250),
-                logo_pda: Color::Rgb(156, 163, 175),
-            },
-            Theme::Light => Self {
-                primary: Color::Rgb(39, 39, 42),
-                secondary: Color::Rgb(82, 82, 91),
-                accent: Color::Rgb(99, 102, 241),
-                warn: Color::Rgb(217, 119, 6),
-                error: Color::Rgb(220, 38, 38),
-                quote_bg: Color::Rgb(228, 228, 231),
-                dim: Color::Rgb(161, 161, 170),
-                logo_hi: Color::Rgb(124, 58, 237),
-                logo_pda: Color::Rgb(107, 114, 128),
-            },
-        }
-    }
-
-    pub fn primary_style(self) -> Style {
-        Style::default().fg(self.primary)
+    pub fn foreground_style(self) -> Style {
+        Style::default().fg(self.foreground)
     }
 
     pub fn secondary_style(self) -> Style {
         Style::default().fg(self.secondary)
     }
 
+    pub fn muted_style(self) -> Style {
+        Style::default().fg(self.muted)
+    }
+
     pub fn accent_style(self) -> Style {
         Style::default().fg(self.accent)
     }
 
-    pub fn dim_style(self) -> Style {
-        Style::default().fg(self.dim)
+    pub fn link_style(self) -> Style {
+        Style::default().fg(self.link)
     }
 
-    pub fn error_style(self) -> Style {
-        Style::default().fg(self.error)
+    pub fn success_style(self) -> Style {
+        Style::default().fg(self.success)
     }
 
     pub fn warn_style(self) -> Style {
         Style::default().fg(self.warn)
     }
 
+    pub fn error_style(self) -> Style {
+        Style::default().fg(self.error)
+    }
+
     pub fn title_style(self, title_color: Option<&str>) -> Style {
         let base = title_color
             .and_then(parse_hex_color)
-            .unwrap_or(self.primary);
+            .unwrap_or(self.foreground);
         Style::default().fg(base)
     }
 
@@ -77,6 +59,23 @@ impl Palette {
         Style::default()
             .fg(self.accent)
             .add_modifier(Modifier::BOLD)
+    }
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            foreground: Color::Rgb(224, 232, 240),
+            secondary: Color::Rgb(132, 139, 189),
+            muted: Color::Rgb(73, 84, 149),
+            accent: Color::Rgb(255, 126, 219),
+            link: Color::Rgb(54, 249, 246),
+            success: Color::Rgb(114, 241, 184),
+            warn: Color::Rgb(254, 222, 93),
+            error: Color::Rgb(254, 68, 80),
+            logo_hi: Color::Rgb(234, 0, 217),
+            logo_lo: Color::Rgb(10, 189, 198),
+        }
     }
 }
 
@@ -91,26 +90,30 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
-/// Logo breathing cycle in ticks (50ms each). ~0.8s full cycle for visible flow.
-const LOGO_CYCLE: u64 = 16;
-const LOGO_CHAR_OFFSET: u64 = 2;
+/// Logo breathing cycle in ticks (50ms each). ~0.4s full cycle.
+const LOGO_CYCLE: u64 = 8;
+const LOGO_CHAR_OFFSET: u64 = 3;
 
 pub fn logo_color(tick: u64, palette: Palette) -> Color {
     let phase = (tick % LOGO_CYCLE) as f32 / LOGO_CYCLE as f32;
     let t = logo_wave(phase);
-    lerp_color(palette.logo_hi, palette.logo_pda, t)
+    lerp_color(palette.logo_hi, palette.logo_lo, t)
 }
 
 /// Per-character hue shift for title logo breathing effect.
 pub fn logo_char_color(index: usize, tick: u64, palette: Palette) -> Color {
-    let phase = ((tick + index as u64 * LOGO_CHAR_OFFSET) % LOGO_CYCLE) as f32
-        / LOGO_CYCLE as f32;
+    let phase = ((tick + index as u64 * LOGO_CHAR_OFFSET) % LOGO_CYCLE) as f32 / LOGO_CYCLE as f32;
     let t = logo_wave(phase);
-    lerp_color(palette.logo_hi, palette.logo_pda, t)
+    lerp_color(palette.logo_hi, palette.logo_lo, t)
 }
 
 fn logo_wave(phase: f32) -> f32 {
-    ((phase * std::f32::consts::PI * 2.0).sin() + 1.0) / 2.0
+    let t = phase.fract() * 2.0;
+    if t < 1.0 {
+        t
+    } else {
+        2.0 - t
+    }
 }
 
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
@@ -127,6 +130,6 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 fn color_to_rgb(color: Color) -> (u8, u8, u8) {
     match color {
         Color::Rgb(r, g, b) => (r, g, b),
-        _ => (167, 139, 250),
+        _ => (234, 0, 217),
     }
 }

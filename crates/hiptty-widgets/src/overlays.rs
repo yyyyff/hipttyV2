@@ -1,4 +1,4 @@
-use hiptty_core::{forum_name, Theme};
+use hiptty_core::forum_name;
 use hiptty_render::{str_width, truncate_str, Palette};
 use ratatui::{
     layout::Rect,
@@ -8,14 +8,7 @@ use ratatui::{
     Frame,
 };
 
-pub const MAIN_MENU_ITEMS: &[&str] = &[
-    "私信",
-    "通知",
-    "我的帖子",
-    "我的回复",
-    "我的收藏",
-    "设置",
-];
+pub const MAIN_MENU_ITEMS: &[&str] = &["私信", "通知", "我的帖子", "我的回复", "我的收藏", "设置"];
 
 pub struct MainMenuProps {
     pub palette: Palette,
@@ -35,21 +28,21 @@ pub fn draw_main_menu(frame: &mut Frame<'_>, area: Rect, props: MainMenuProps) {
     frame.render_widget(block, dialog);
     let mut lines = vec![Line::from(Span::styled(
         "Esc 关闭",
-        props.palette.dim_style(),
+        props.palette.muted_style(),
     ))];
     for (i, item) in MAIN_MENU_ITEMS.iter().enumerate() {
         let prefix = if i == props.selected { "● " } else { "  " };
         let style = if i == props.selected {
             props.palette.accent_style().add_modifier(Modifier::BOLD)
         } else {
-            props.palette.primary_style()
+            props.palette.foreground_style()
         };
         lines.push(Line::from(Span::styled(format!("{prefix}{item}"), style)));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "j/k  Enter  Esc",
-        props.palette.dim_style(),
+        props.palette.muted_style(),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -87,7 +80,7 @@ Ctrl+S 发送  Ctrl+I 插图\n\
 \n\
 Enter / Esc 关闭";
     frame.render_widget(
-        Paragraph::new(text).style(props.palette.primary_style()),
+        Paragraph::new(text).style(props.palette.foreground_style()),
         inner,
     );
 }
@@ -101,7 +94,7 @@ pub struct SettingsProps<'a> {
 
 pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsProps<'_>) {
     let width = area.width.min(44);
-    let height = 12.min(area.height.saturating_sub(4));
+    let height = 11.min(area.height.saturating_sub(4));
     let dialog = centered_rect(width, height, area);
     frame.render_widget(Clear, dialog);
     let block = Block::default()
@@ -111,12 +104,7 @@ pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsPro
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
-    let theme = match props.settings.theme {
-        Theme::Dark => "Dark",
-        Theme::Light => "Light",
-    };
     let rows = [
-        format!("主题         [{theme}]"),
         format!(
             "默认版块 1   [{}]",
             forum_name(props.settings.default_forums[0]).unwrap_or("?")
@@ -137,14 +125,14 @@ pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsPro
         let style = if i == props.selected {
             props.palette.accent_style()
         } else {
-            props.palette.primary_style()
+            props.palette.foreground_style()
         };
         lines.push(Line::from(Span::styled(format!("{prefix}{row}"), style)));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter 修改  Esc 关闭",
-        props.palette.dim_style(),
+        props.palette.muted_style(),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -163,12 +151,13 @@ pub fn draw_command_bar(frame: &mut Frame<'_>, area: Rect, props: CommandBarProp
         height: bar_h,
     };
     frame.render_widget(Clear, bar);
-    let line = format!(":{}█", props.input);
-    frame.render_widget(
-        Paragraph::new(truncate_str(&line, bar.width.saturating_sub(1) as usize))
-            .style(props.palette.accent_style()),
-        bar,
-    );
+    let input = truncate_str(props.input, bar.width.saturating_sub(3) as usize);
+    let line = Line::from(vec![
+        Span::styled(":", props.palette.accent_style()),
+        Span::styled(input, props.palette.foreground_style()),
+        Span::styled("█", props.palette.accent_style()),
+    ]);
+    frame.render_widget(Paragraph::new(line), bar);
     let _ = str_width;
 }
 
@@ -191,7 +180,7 @@ pub fn draw_search_prompt(frame: &mut Frame<'_>, area: Rect, props: SearchPrompt
     frame.render_widget(block, dialog);
     let prompt = format!("在 {} 搜索: {}█", props.forum_name, props.input);
     frame.render_widget(
-        Paragraph::new(prompt).style(props.palette.primary_style()),
+        Paragraph::new(prompt).style(props.palette.foreground_style()),
         inner,
     );
 }

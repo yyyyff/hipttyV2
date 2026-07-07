@@ -8,9 +8,7 @@ mod prefetch;
 mod smiley;
 
 pub use avatar_disk::AvatarDiskCache;
-pub use cache::{
-    FetchOutcome, ImageCache, ImageEntry, ImageKind, ImageState, ReadyDraw,
-};
+pub use cache::{FetchOutcome, ImageCache, ImageEntry, ImageKind, ImageState, ReadyDraw};
 pub use content_layout::{layout_post_blocks, ContentBlock};
 pub use draw::{
     draw_avatar_entry, draw_graphic_in_viewport, draw_image_entry, image_area_width,

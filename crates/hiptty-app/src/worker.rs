@@ -1,9 +1,9 @@
 use hiptty_adapter::ForumClient;
+use hiptty_core::SearchQuery;
 use hiptty_core::{
     AdapterResult, Credentials, PostAction, PostResult, PrePostInfo, SessionInfo, ThreadDetail,
     ThreadList, SECURITY_QUESTIONS,
 };
-use hiptty_core::SearchQuery;
 use hiptty_image::ImageKind;
 use tokio::sync::mpsc;
 
@@ -220,12 +220,7 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                     delete,
                 } => {
                     let result = client
-                        .post(
-                            action.clone(),
-                            &content,
-                            subject.as_deref(),
-                            delete,
-                        )
+                        .post(action.clone(), &content, subject.as_deref(), delete)
                         .await;
                     let _ = tx.send(WorkerResponse::PostSubmitted {
                         action,
@@ -306,9 +301,7 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("image.jpg");
-                        client
-                            .upload_image(action, &bytes, filename)
-                            .await
+                        client.upload_image(action, &bytes, filename).await
                     }
                     .await;
                     let _ = tx.send(WorkerResponse::ComposerImageUploaded { path, result });

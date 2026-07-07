@@ -5,8 +5,7 @@ use rust_embed::RustEmbed;
 struct AvatarAssets;
 
 pub fn noavatar_bytes() -> Option<Vec<u8>> {
-    AvatarAssets::get("noavatar.jpg")
-        .map(|file| file.data.into_owned())
+    AvatarAssets::get("noavatar.jpg").map(|file| file.data.into_owned())
 }
 
 #[cfg(test)]

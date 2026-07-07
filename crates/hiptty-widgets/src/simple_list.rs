@@ -1,6 +1,8 @@
 use hiptty_core::ListItem;
 use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS, AVATAR_ROWS};
-use hiptty_render::{clear_content_viewport, format_relative_time, str_width, truncate_str, Palette};
+use hiptty_render::{
+    clear_content_viewport, format_relative_time, str_width, truncate_str, Palette,
+};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Modifier,
@@ -101,7 +103,7 @@ fn draw_simple_item(
         Paragraph::new(bar).style(if selected {
             palette.accent_style()
         } else {
-            palette.dim_style()
+            palette.muted_style()
         }),
         selector,
     );
@@ -125,25 +127,14 @@ fn draw_simple_item(
                 height: AVATAR_ROWS.saturating_sub(intra_skip).min(area.height),
                 ..cols[0]
             };
-            draw_avatar_entry(
-                frame,
-                avatar_area,
-                avatar,
-                placeholder,
-                palette,
-                intra_skip,
-            );
+            draw_avatar_entry(frame, avatar_area, avatar, placeholder, palette, intra_skip);
         }
     }
 
     let text_w = cols[1].width.saturating_sub(1) as usize;
     let new_mark = if item.is_new { "● " } else { "  " };
     let author = item.author.as_deref().unwrap_or("系统");
-    let preview = item
-        .title
-        .as_deref()
-        .or(item.info.as_deref())
-        .unwrap_or("");
+    let preview = item.title.as_deref().or(item.info.as_deref()).unwrap_or("");
     let line1 = format!("{new_mark}{author}  {preview}");
     let line1 = truncate_str(&line1, text_w);
     let time = item
@@ -158,7 +149,7 @@ fn draw_simple_item(
     } else if item.is_new {
         palette.accent_style()
     } else {
-        palette.primary_style()
+        palette.foreground_style()
     };
 
     let mut lines = Vec::new();
