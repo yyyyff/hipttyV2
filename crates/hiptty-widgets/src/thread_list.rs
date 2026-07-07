@@ -13,6 +13,9 @@ use ratatui::{
 
 pub const ITEM_HEIGHT: u16 = 3;
 const CONTENT_ROWS: u16 = 2;
+/// Selection bar spans the title band only. Avatars reserve `AVATAR_ROWS` cells but
+/// render compactly on the first row; extending the bar into the meta row looks misaligned.
+const SELECTOR_ROWS: u16 = 1;
 const SELECTOR_W: u16 = 1;
 const CONTENT_RIGHT_PAD: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
@@ -125,7 +128,11 @@ fn draw_thread_item(
     } else {
         0
     };
-    let bar_rows = if show_avatar { avatar_h } else { band_h };
+    let bar_rows = if show_avatar {
+        SELECTOR_ROWS.saturating_sub(intra_skip).min(band_h)
+    } else {
+        band_h
+    };
     if bar_rows == 0 {
         return;
     }
