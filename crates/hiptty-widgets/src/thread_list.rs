@@ -12,7 +12,10 @@ use ratatui::{
 };
 
 pub const ITEM_HEIGHT: u16 = 3;
+const CONTENT_ROWS: u16 = 2;
 const SELECTOR_W: u16 = 1;
+const SELECTOR_GAP: u16 = 1;
+const CONTENT_RIGHT_PAD: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
 const COUNT_GAP: &str = "   ";
 
@@ -107,25 +110,40 @@ fn draw_thread_item(
     intra_skip: u16,
     images: &mut Option<&mut ImageCache>,
 ) {
-    const CONTENT_ROWS: u16 = 2;
-    let visible_rows = CONTENT_ROWS.saturating_sub(intra_skip).min(area.height);
-    if visible_rows == 0 {
+    let band_h = CONTENT_ROWS.saturating_sub(intra_skip).min(area.height);
+    if band_h == 0 {
+        return;
+    }
+    let band = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: band_h,
+    };
+
+    let bar_rows = if show_avatar {
+        AVATAR_ROWS.saturating_sub(intra_skip).min(band_h)
+    } else {
+        band_h
+    };
+    if bar_rows == 0 {
         return;
     }
 
     let selector_area = Rect {
-        x: area.x,
-        y: area.y,
+        x: band.x,
+        y: band.y,
         width: SELECTOR_W,
-        height: visible_rows,
+        height: bar_rows,
     };
     draw_selector(frame, selector_area, selected, palette);
 
+    let body_inset = SELECTOR_W + if show_avatar { SELECTOR_GAP } else { 0 };
     let body = Rect {
-        x: area.x + SELECTOR_W,
-        y: area.y,
-        width: area.width.saturating_sub(SELECTOR_W),
-        height: visible_rows,
+        x: band.x + body_inset,
+        y: band.y,
+        width: band.width.saturating_sub(body_inset),
+        height: band_h,
     };
 
     let cols = Layout::horizontal([
@@ -147,7 +165,7 @@ fn draw_thread_item(
 
     let right_area = cols[1];
     let mut text_y = right_area.y;
-    if intra_skip == 0 && visible_rows >= 1 {
+    if intra_skip == 0 && band_h >= 1 {
         let row = Rect {
             x: right_area.x,
             y: text_y,
@@ -157,7 +175,7 @@ fn draw_thread_item(
         draw_title_row(frame, row, thread, selected, palette);
         text_y = text_y.saturating_add(1);
     }
-    if intra_skip <= 1 && text_y < right_area.y + visible_rows {
+    if intra_skip <= 1 && text_y < right_area.y + band_h {
         let row = Rect {
             x: right_area.x,
             y: text_y,
@@ -187,18 +205,22 @@ fn draw_title_row(
     selected: bool,
     palette: Palette,
 ) {
+    let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
     let counts = build_counts(thread);
     let counts_w = if counts.is_empty() {
         0
     } else {
-        str_width(&counts).min(area.width as usize) as u16 + 1
+        str_width(&counts).min(usable_w as usize) as u16 + 1
     };
 
     let cols = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(counts_w.min(area.width)),
+        Constraint::Length(counts_w.min(usable_w)),
     ])
-    .split(area);
+    .split(Rect {
+        width: usable_w,
+        ..area
+    });
 
     let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize);
 
@@ -232,6 +254,7 @@ fn draw_meta_row(
 ) {
     let author = build_author_line(thread);
     let time = build_time_line(thread);
+    let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
 
     let meta_style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)
@@ -241,7 +264,7 @@ fn draw_meta_row(
 
     if time.is_empty() {
         frame.render_widget(
-            Paragraph::new(truncate_str(&author, area.width.saturating_sub(1) as usize))
+            Paragraph::new(truncate_str(&author, usable_w.saturating_sub(1) as usize))
                 .style(meta_style),
             area,
         );
@@ -249,7 +272,7 @@ fn draw_meta_row(
     }
 
     let time_w = str_width(&time);
-    let total = area.width as usize;
+    let total = usable_w as usize;
 
     if time_w >= total {
         frame.render_widget(

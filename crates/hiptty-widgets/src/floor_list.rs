@@ -49,6 +49,7 @@ pub fn measure_floor(
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
+    include_separator: bool,
 ) -> u16 {
     if width < 8 {
         return 0;
@@ -60,7 +61,8 @@ pub fn measure_floor(
         .map(|p| poll_block_height(p, body_w))
         .unwrap_or(0);
     let content_h = content_height(post, body_w, palette, images);
-    HEADER_H + GAP_H + poll_h + content_h + SEPARATOR_H
+    let sep = u16::from(include_separator) * SEPARATOR_H;
+    HEADER_H + GAP_H + poll_h + content_h + sep
 }
 
 pub fn floor_list_total_height(
@@ -71,7 +73,8 @@ pub fn floor_list_total_height(
 ) -> u16 {
     posts
         .iter()
-        .map(|p| measure_floor(p, width, palette, images))
+        .enumerate()
+        .map(|(idx, p)| measure_floor(p, width, palette, images, idx + 1 < posts.len()))
         .sum()
 }
 
@@ -83,9 +86,15 @@ pub fn floor_offsets(
 ) -> Vec<u16> {
     let mut offsets = Vec::with_capacity(posts.len());
     let mut top = 0u16;
-    for post in posts {
+    for (idx, post) in posts.iter().enumerate() {
         offsets.push(top);
-        top = top.saturating_add(measure_floor(post, width, palette, images));
+        top = top.saturating_add(measure_floor(
+            post,
+            width,
+            palette,
+            images,
+            idx + 1 < posts.len(),
+        ));
     }
     offsets
 }
@@ -99,7 +108,13 @@ pub fn first_visible_floor(
 ) -> usize {
     let offsets = floor_offsets(posts, width, palette, images);
     for (idx, &top) in offsets.iter().enumerate() {
-        let bottom = top.saturating_add(measure_floor(&posts[idx], width, palette, images));
+        let bottom = top.saturating_add(measure_floor(
+            &posts[idx],
+            width,
+            palette,
+            images,
+            idx + 1 < posts.len(),
+        ));
         if bottom > scroll_top {
             return idx;
         }
@@ -126,7 +141,13 @@ pub fn last_visible_floor(
         if top >= viewport_bottom {
             break;
         }
-        let bottom = top.saturating_add(measure_floor(&posts[idx], width, palette, images));
+        let bottom = top.saturating_add(measure_floor(
+            &posts[idx],
+            width,
+            palette,
+            images,
+            idx + 1 < posts.len(),
+        ));
         if bottom > scroll_top {
             last = idx;
         }
@@ -148,8 +169,8 @@ pub fn floors_per_page(
     }
     let mut used = 0u16;
     let mut count = 0usize;
-    for post in posts.iter().skip(first_floor) {
-        let h = measure_floor(post, width, palette, images);
+    for (idx, post) in posts.iter().enumerate().skip(first_floor) {
+        let h = measure_floor(post, width, palette, images, idx + 1 < posts.len());
         if count > 0 && used.saturating_add(h) > viewport_h {
             break;
         }
@@ -174,7 +195,13 @@ pub fn ensure_scroll_top(
     let selected = selected.min(posts.len() - 1);
     let offsets = floor_offsets(posts, width, palette, images);
     let sel_top = offsets[selected];
-    let floor_h = measure_floor(&posts[selected], width, palette, images);
+    let floor_h = measure_floor(
+        &posts[selected],
+        width,
+        palette,
+        images,
+        selected + 1 < posts.len(),
+    );
     let sel_bottom = sel_top.saturating_add(floor_h);
 
     if sel_top < scroll_top {
@@ -290,7 +317,13 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
     let mut logical_top = 0u16;
 
     for (idx, post) in props.posts.iter().enumerate() {
-        let floor_h = measure_floor(post, area.width, props.palette, props.images.as_deref());
+        let floor_h = measure_floor(
+            post,
+            area.width,
+            props.palette,
+            props.images.as_deref(),
+            idx + 1 < props.posts.len(),
+        );
         let floor_bottom = logical_top.saturating_add(floor_h);
 
         if floor_bottom <= props.scroll_top {
@@ -330,6 +363,7 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
             props.scroll_top,
             logical_top,
             skip_lines,
+            idx + 1 < props.posts.len(),
         );
 
         logical_top = floor_bottom;
@@ -349,6 +383,7 @@ fn draw_floor(
     scroll_top: u16,
     floor_top: u16,
     skip_lines: u16,
+    draw_separator: bool,
 ) {
     let body = Rect {
         x: area.x + BAR_W,
@@ -591,8 +626,8 @@ fn draw_floor(
         }
     }
 
-    // Separator (no bar — ends at floor boundary)
-    if next_visible_row(frame, &mut y, &mut line_idx, false) {
+    // Separator between floors (skip on last floor — status bar rule follows).
+    if draw_separator && next_visible_row(frame, &mut y, &mut line_idx, false) {
         let rule = "─".repeat(body.width as usize);
         frame.render_widget(
             Paragraph::new(rule).style(palette.muted_style()),
@@ -778,8 +813,8 @@ mod tests {
     fn floor_includes_gap_row() {
         let post = sample_post();
         let palette = Palette::default();
-        let h = measure_floor(&post, 80, palette, None);
-        let without_gap = HEADER_H + SEPARATOR_H + 1;
+        let h = measure_floor(&post, 80, palette, None, false);
+        let without_gap = HEADER_H + 1;
         assert!(h > without_gap);
     }
 
@@ -787,7 +822,7 @@ mod tests {
     fn scroll_down_minimal() {
         let posts = vec![sample_post(); 6];
         let palette = Palette::default();
-        let h = measure_floor(&posts[0], 80, palette, None);
+        let h = measure_floor(&posts[0], 80, palette, None, true);
         let viewport = h * 4;
         let scroll = ensure_scroll_top(4, 0, &posts, 80, viewport, palette, None);
         assert_eq!(scroll, h);
@@ -815,7 +850,7 @@ mod tests {
     fn page_down_advances_by_visible_floors() {
         let posts = vec![sample_post(); 8];
         let palette = Palette::default();
-        let h = measure_floor(&posts[0], 80, palette, None);
+        let h = measure_floor(&posts[0], 80, palette, None, true);
         let viewport = h * 4;
         let next = page_scroll_top(0, 1, &posts, 80, viewport, palette, None);
         assert_eq!(next, h * 4);
@@ -825,7 +860,7 @@ mod tests {
     fn detail_step_down_scrolls_half_viewport() {
         let posts = vec![sample_post(); 8];
         let palette = Palette::default();
-        let floor_h = measure_floor(&posts[0], 80, palette, None);
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
         let viewport = floor_h.saturating_mul(3);
         let half = (viewport / 2).max(1);
         assert!(
@@ -862,7 +897,7 @@ mod tests {
     fn last_visible_floor_tracks_viewport_bottom() {
         let posts = vec![sample_post(); 6];
         let palette = Palette::default();
-        let floor_h = measure_floor(&posts[0], 80, palette, None);
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
         let viewport = floor_h.saturating_mul(2);
         let scroll = floor_h.saturating_mul(3);
         let last = last_visible_floor(scroll, &posts, 80, viewport, palette, None);
