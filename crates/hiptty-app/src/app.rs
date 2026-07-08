@@ -214,6 +214,7 @@ pub struct App {
     pub title_bar_area: ratatui::layout::Rect,
     pub title_bar_hits: TitleBarHits,
     pub main_menu_hits: Vec<ratatui::layout::Rect>,
+    pub settings_hits: Vec<ratatui::layout::Rect>,
     pub last_click: Option<MouseClickState>,
 }
 
@@ -275,6 +276,7 @@ impl App {
             title_bar_area: ratatui::layout::Rect::default(),
             title_bar_hits: TitleBarHits::default(),
             main_menu_hits: Vec::new(),
+            settings_hits: Vec::new(),
             last_click: None,
         }
     }

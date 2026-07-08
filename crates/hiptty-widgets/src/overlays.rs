@@ -82,7 +82,7 @@ pub struct SettingsProps<'a> {
     pub blacklist_count: usize,
 }
 
-pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsProps<'_>) {
+pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsProps<'_>) -> Vec<Rect> {
     let width = area.width.min(46);
     let height = 11.min(area.height.saturating_sub(4));
     let modal = begin_modal(
@@ -119,6 +119,15 @@ pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsPro
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), modal.body);
+
+    (0..rows.len())
+        .map(|i| Rect {
+            x: modal.body.x,
+            y: modal.body.y.saturating_add(i as u16),
+            width: modal.body.width,
+            height: 1,
+        })
+        .collect()
 }
 
 pub struct CommandBarProps<'a> {

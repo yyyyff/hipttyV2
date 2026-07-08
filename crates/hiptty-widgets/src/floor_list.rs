@@ -14,6 +14,9 @@ use ratatui::{
 };
 
 use crate::poll_block::{draw_poll_block, poll_block_height};
+use crate::scroll::WHEEL_LINES;
+
+const DETAIL_STEP_LINES: u16 = WHEEL_LINES as u16;
 
 const BAR_W: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
@@ -121,6 +124,26 @@ pub fn first_visible_floor(
         }
     }
     posts.len().saturating_sub(1)
+}
+
+/// Floor index containing document line `line` (0-based from the list top).
+pub fn floor_index_at_line(
+    line: u16,
+    posts: &[Post],
+    width: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> usize {
+    if posts.is_empty() {
+        return 0;
+    }
+    let offsets = floor_offsets(posts, width, palette, images);
+    for (idx, &top) in offsets.iter().enumerate().rev() {
+        if line >= top {
+            return idx;
+        }
+    }
+    0
 }
 
 /// Last floor with any row inside the viewport `[scroll_top, scroll_top + viewport_h)`.
@@ -236,7 +259,138 @@ pub fn clamp_scroll_top(
     scroll_top.min(total.saturating_sub(viewport_h))
 }
 
-/// Scroll down half viewport height. Selection follows the top visible floor.
+fn top_visible_floor_height(
+    scroll_top: u16,
+    posts: &[Post],
+    width: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> (usize, u16) {
+    let first = first_visible_floor(scroll_top, posts, width, palette, images);
+    let floor_h = measure_floor(
+        &posts[first],
+        width,
+        palette,
+        images,
+        first + 1 < posts.len(),
+    );
+    (first, floor_h)
+}
+
+/// Maximum `scroll_top` while the viewport bottom aligns with the floor bottom.
+fn floor_read_end_scroll(floor_top: u16, floor_h: u16, viewport_h: u16) -> u16 {
+    let floor_bottom = floor_top.saturating_add(floor_h);
+    floor_bottom.saturating_sub(viewport_h).max(floor_top)
+}
+
+fn scroll_to_previous_floor(
+    first: usize,
+    posts: &[Post],
+    width: u16,
+    viewport_h: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> u16 {
+    if first == 0 {
+        return 0;
+    }
+    let offsets = floor_offsets(posts, width, palette, images);
+    let prev = first - 1;
+    let prev_top = offsets[prev];
+    let prev_h = measure_floor(
+        &posts[prev],
+        width,
+        palette,
+        images,
+        prev + 1 < posts.len(),
+    );
+    if prev_h > viewport_h {
+        floor_read_end_scroll(prev_top, prev_h, viewport_h)
+    } else {
+        prev_top
+    }
+}
+
+/// Line-wise detail scroll (wheel or j/k inside a tall floor). Tall floors snap to the next /
+/// previous floor instead of leaving the successor half off-screen.
+pub fn detail_line_scroll(
+    scroll_top: u16,
+    delta_lines: i32,
+    posts: &[Post],
+    width: u16,
+    viewport_h: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> u16 {
+    if posts.is_empty() || viewport_h == 0 || delta_lines == 0 {
+        return scroll_top;
+    }
+    let total = floor_list_total_height(posts, width, palette, images);
+    let max_scroll = total.saturating_sub(viewport_h);
+
+    if delta_lines > 0 {
+        let step = delta_lines as u16;
+        if scroll_top >= max_scroll {
+            return max_scroll;
+        }
+        let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
+        if floor_h <= viewport_h {
+            return scroll_top.saturating_add(step).min(max_scroll);
+        }
+
+        let offsets = floor_offsets(posts, width, palette, images);
+        let floor_top = offsets[first];
+        let floor_end = floor_read_end_scroll(floor_top, floor_h, viewport_h);
+
+        if scroll_top >= floor_end {
+            if first + 1 < posts.len() {
+                return offsets[first + 1];
+            }
+            return max_scroll;
+        }
+
+        let candidate = scroll_top.saturating_add(step);
+        if candidate > floor_end {
+            if first + 1 < posts.len() {
+                return offsets[first + 1];
+            }
+            return floor_end.min(max_scroll);
+        }
+        candidate.min(max_scroll)
+    } else {
+        let step = (-delta_lines) as u16;
+        if scroll_top == 0 {
+            return 0;
+        }
+        let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
+        let offsets = floor_offsets(posts, width, palette, images);
+        let floor_top = offsets[first];
+
+        if floor_h <= viewport_h {
+            if scroll_top <= floor_top {
+                return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
+            }
+            let candidate = scroll_top.saturating_sub(step);
+            if candidate < floor_top {
+                return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
+            }
+            return candidate;
+        }
+
+        if scroll_top <= floor_top {
+            return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
+        }
+
+        let candidate = scroll_top.saturating_sub(step);
+        if candidate < floor_top {
+            return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
+        }
+        candidate
+    }
+}
+
+/// j/Down: short floors advance one floor; tall floors scroll [`DETAIL_STEP_LINES`] lines.
+/// Selection follows the top visible floor.
 pub fn detail_step_down(
     selected: usize,
     scroll_top: u16,
@@ -255,13 +409,32 @@ pub fn detail_step_down(
     if scroll_top >= max_scroll {
         return (selected, max_scroll);
     }
-    let half_page = (viewport_h / 2).max(1);
-    let new_scroll = scroll_top.saturating_add(half_page).min(max_scroll);
+
+    let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
+    let new_scroll = if floor_h > viewport_h {
+        detail_line_scroll(
+            scroll_top,
+            i32::from(DETAIL_STEP_LINES),
+            posts,
+            width,
+            viewport_h,
+            palette,
+            images,
+        )
+    } else {
+        let offsets = floor_offsets(posts, width, palette, images);
+        if first + 1 < posts.len() {
+            offsets[first + 1]
+        } else {
+            max_scroll
+        }
+    };
     let new_selected = first_visible_floor(new_scroll, posts, width, palette, images);
     (new_selected, new_scroll)
 }
 
-/// Scroll up half viewport height. Selection follows the top visible floor.
+/// k/Up: short floors snap to the current floor top, then the previous floor; tall floors
+/// scroll [`DETAIL_STEP_LINES`] lines. Selection follows the top visible floor.
 pub fn detail_step_up(
     selected: usize,
     scroll_top: u16,
@@ -278,8 +451,29 @@ pub fn detail_step_up(
     if scroll_top == 0 {
         return (0, 0);
     }
-    let half_page = (viewport_h / 2).max(1);
-    let new_scroll = scroll_top.saturating_sub(half_page);
+
+    let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
+    let new_scroll = if floor_h > viewport_h {
+        detail_line_scroll(
+            scroll_top,
+            -i32::from(DETAIL_STEP_LINES),
+            posts,
+            width,
+            viewport_h,
+            palette,
+            images,
+        )
+    } else {
+        let offsets = floor_offsets(posts, width, palette, images);
+        let floor_top = offsets[first];
+        if scroll_top > floor_top {
+            floor_top
+        } else if first > 0 {
+            offsets[first - 1]
+        } else {
+            0
+        }
+    };
     let new_selected = first_visible_floor(new_scroll, posts, width, palette, images);
     (new_selected, new_scroll)
 }
@@ -822,6 +1016,24 @@ mod tests {
     }
 
     #[test]
+    fn floor_index_at_line_maps_document_rows() {
+        let posts = vec![sample_post(); 4];
+        let palette = Palette::default();
+        let offsets = floor_offsets(&posts, 80, palette, None);
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
+
+        assert_eq!(floor_index_at_line(0, &posts, 80, palette, None), 0);
+        assert_eq!(
+            floor_index_at_line(offsets[1], &posts, 80, palette, None),
+            1
+        );
+        assert_eq!(
+            floor_index_at_line(offsets[1] + floor_h - 1, &posts, 80, palette, None),
+            1
+        );
+    }
+
+    #[test]
     fn floor_includes_gap_row() {
         let post = sample_post();
         let palette = Palette::default();
@@ -868,20 +1080,29 @@ mod tests {
         assert_eq!(next, h * 4);
     }
 
+    fn tall_post() -> Post {
+        let mut post = sample_post();
+        post.content = vec![ContentNode::Text {
+            spans: vec![ContentSpan::Text {
+                text: "x".repeat(2000),
+                style: Default::default(),
+                url: None,
+            }],
+        }];
+        post
+    }
+
     #[test]
-    fn detail_step_down_scrolls_half_viewport() {
+    fn detail_step_down_advances_by_floor_when_short() {
         let posts = vec![sample_post(); 8];
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, true);
         let viewport = floor_h.saturating_mul(3);
-        let half = (viewport / 2).max(1);
-        assert!(
-            floor_list_total_height(&posts, 80, palette, None) > viewport,
-            "fixture must overflow viewport"
-        );
+        assert!(floor_h <= viewport);
 
-        let (_sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
-        assert_eq!(scroll, half);
+        let (sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
+        assert_eq!(scroll, floor_h);
+        assert_eq!(sel, 1);
 
         let max_scroll =
             floor_list_total_height(&posts, 80, palette, None).saturating_sub(viewport);
@@ -891,18 +1112,105 @@ mod tests {
     }
 
     #[test]
-    fn detail_step_up_scrolls_half_viewport() {
+    fn detail_step_down_scrolls_three_lines_when_tall() {
+        let posts = vec![tall_post()];
+        let palette = Palette::default();
+        let floor_h = measure_floor(&posts[0], 80, palette, None, false);
+        let viewport = 12u16;
+        assert!(floor_h > viewport, "floor_h={floor_h} viewport={viewport}");
+
+        let (sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
+        assert_eq!(scroll, DETAIL_STEP_LINES);
+        assert_eq!(sel, 0);
+    }
+
+    #[test]
+    fn detail_step_up_advances_by_floor_when_short() {
         let posts = vec![sample_post(); 4];
         let palette = Palette::default();
-        let viewport = 20u16;
-        let half = (viewport / 2).max(1);
-        let (sel, scroll) = detail_step_up(2, 10, &posts, 80, viewport, palette, None);
-        assert_eq!(scroll, 10u16.saturating_sub(half));
-        assert_eq!(sel, first_visible_floor(scroll, &posts, 80, palette, None));
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
+        let viewport = floor_h.saturating_mul(3);
+        let offsets = floor_offsets(&posts, 80, palette, None);
+
+        let (sel, scroll) = detail_step_up(2, offsets[2] + 1, &posts, 80, viewport, palette, None);
+        assert_eq!(scroll, offsets[2]);
+        assert_eq!(sel, 2);
+
+        let (sel, scroll) = detail_step_up(2, offsets[2], &posts, 80, viewport, palette, None);
+        assert_eq!(scroll, offsets[1]);
+        assert_eq!(sel, 1);
 
         let (sel, scroll) = detail_step_up(0, 0, &posts, 80, viewport, palette, None);
         assert_eq!(sel, 0);
         assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn detail_step_up_scrolls_three_lines_when_tall() {
+        let posts = vec![tall_post()];
+        let palette = Palette::default();
+        let floor_h = measure_floor(&posts[0], 80, palette, None, false);
+        let viewport = 12u16;
+        assert!(floor_h > viewport, "floor_h={floor_h} viewport={viewport}");
+
+        let (sel, scroll) = detail_step_up(0, 15, &posts, 80, viewport, palette, None);
+        assert_eq!(scroll, 15 - DETAIL_STEP_LINES);
+        assert_eq!(sel, 0);
+    }
+
+    #[test]
+    fn detail_line_scroll_snaps_to_next_floor_top() {
+        let posts = vec![tall_post(), sample_post()];
+        let palette = Palette::default();
+        let viewport = 12u16;
+        let offsets = floor_offsets(&posts, 80, palette, None);
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
+        assert!(floor_h > viewport);
+        let floor_end = floor_read_end_scroll(offsets[0], floor_h, viewport);
+
+        let scroll = detail_line_scroll(
+            floor_end,
+            i32::from(DETAIL_STEP_LINES),
+            &posts,
+            80,
+            viewport,
+            palette,
+            None,
+        );
+        assert_eq!(scroll, offsets[1]);
+
+        let near_end = floor_end.saturating_sub(DETAIL_STEP_LINES.saturating_sub(1));
+        let scroll = detail_line_scroll(
+            near_end,
+            i32::from(DETAIL_STEP_LINES),
+            &posts,
+            80,
+            viewport,
+            palette,
+            None,
+        );
+        assert_eq!(scroll, offsets[1]);
+    }
+
+    #[test]
+    fn detail_line_scroll_returns_to_previous_floor_bottom() {
+        let posts = vec![tall_post(), sample_post()];
+        let palette = Palette::default();
+        let viewport = 12u16;
+        let offsets = floor_offsets(&posts, 80, palette, None);
+        let floor_h = measure_floor(&posts[0], 80, palette, None, true);
+        let floor_end = floor_read_end_scroll(offsets[0], floor_h, viewport);
+
+        let scroll = detail_line_scroll(
+            offsets[1],
+            -i32::from(DETAIL_STEP_LINES),
+            &posts,
+            80,
+            viewport,
+            palette,
+            None,
+        );
+        assert_eq!(scroll, floor_end);
     }
 
     #[test]

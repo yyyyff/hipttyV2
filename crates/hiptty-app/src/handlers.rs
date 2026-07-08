@@ -130,6 +130,25 @@ pub fn activate_main_menu_item(
     }
 }
 
+pub fn activate_settings_row(app: &mut App, idx: usize) {
+    match idx {
+        0..=2 => {
+            let forums: Vec<u32> = hiptty_core::FORUMS.iter().map(|forum| forum.id).collect();
+            let current = app.settings.default_forums[idx];
+            let next = forums
+                .iter()
+                .position(|&f| f == current)
+                .map(|i| forums[(i + 1) % forums.len()])
+                .unwrap_or(forums[0]);
+            app.settings.default_forums[idx] = next;
+            let _ = crate::config::save_settings(&app.settings_path, &app.settings);
+            app.set_toast("默认版块已更新", false);
+        }
+        3 => app.set_toast("黑名单管理将在后续版本提供", false),
+        _ => {}
+    }
+}
+
 fn handle_settings_key(
     app: &mut App,
     key: KeyEvent,
@@ -147,23 +166,9 @@ fn handle_settings_key(
             app.overlay_state.settings_selected =
                 app.overlay_state.settings_selected.saturating_sub(1);
         }
-        KeyCode::Enter => match app.overlay_state.settings_selected {
-            0..=2 => {
-                let idx = app.overlay_state.settings_selected;
-                let forums: Vec<u32> = hiptty_core::FORUMS.iter().map(|forum| forum.id).collect();
-                let current = app.settings.default_forums[idx];
-                let next = forums
-                    .iter()
-                    .position(|&f| f == current)
-                    .map(|i| forums[(i + 1) % forums.len()])
-                    .unwrap_or(forums[0]);
-                app.settings.default_forums[idx] = next;
-                let _ = crate::config::save_settings(&app.settings_path, &app.settings);
-                app.set_toast("默认版块已更新", false);
-            }
-            3 => app.set_toast("黑名单管理将在后续版本提供", false),
-            _ => {}
-        },
+        KeyCode::Enter => {
+            activate_settings_row(app, app.overlay_state.settings_selected);
+        }
         _ => {}
     }
 }

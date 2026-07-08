@@ -2,17 +2,18 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use hiptty_widgets::{
-    apply_scroll_delta, clamp_scroll_top, clamp_thread_scroll_lines, item_index_at_row,
-    list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows, ITEM_HEIGHT, PM_ITEM_HEIGHT,
-    SIMPLE_ITEM_HEIGHT, WHEEL_LINES,
+    apply_scroll_delta, clamp_scroll_top, clamp_thread_scroll_lines, floor_index_at_line,
+    item_index_at_row, list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows,
+    ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT, WHEEL_LINES,
 };
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::app::{App, MouseClickState, Overlay, Page};
-use crate::event::{maybe_load_more_detail, open_thread_detail};
+use crate::event::{maybe_load_more, maybe_load_more_detail, open_thread_detail};
 use crate::handlers::{
-    activate_main_menu_item, maybe_load_more_list, open_list_selection, switch_feed_forum,
+    activate_main_menu_item, activate_settings_row, maybe_load_more_list, open_list_selection,
+    switch_feed_forum,
 };
 use crate::list_page::ListPageKind;
 use crate::nav::navigate_to;
@@ -33,6 +34,10 @@ pub fn handle_mouse(
         handle_forum_picker_mouse(app, event, worker_tx);
         return;
     }
+    if app.overlay == Overlay::Settings {
+        handle_settings_mouse(app, event);
+        return;
+    }
     if app.overlay != Overlay::None {
         return;
     }
@@ -46,6 +51,11 @@ pub fn handle_mouse(
 
     if let Some(offset) = scrollbar_action(app, event, current_scroll_offset(app)) {
         apply_scroll_offset(app, offset, worker_tx);
+        return;
+    }
+
+    if matches!(event.kind, MouseEventKind::Moved) {
+        update_selection_from_pointer(app, event.row, event.column, worker_tx);
         return;
     }
 
@@ -99,6 +109,23 @@ fn update_forum_tab_hover(app: &mut App, event: MouseEvent) {
             }
         }
     }
+}
+
+fn handle_settings_mouse(app: &mut App, event: MouseEvent) {
+    if let Some(index) = settings_index_at(app, event.column, event.row) {
+        app.overlay_state.settings_selected = index;
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            activate_settings_row(app, index);
+        }
+    }
+}
+
+fn settings_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
+    app.settings_hits
+        .iter()
+        .enumerate()
+        .find(|(_, hit)| point_in(column, row, **hit))
+        .map(|(i, _)| i)
 }
 
 fn handle_main_menu_mouse(
@@ -251,9 +278,11 @@ fn apply_scroll_offset(
                 let width = app.content_width();
                 let viewport = app.scroll_viewport_height();
                 let palette = app.palette();
-                let images = app.images();
-                app.detail.scroll_top =
-                    clamp_scroll_top(offset, &detail.posts, width, viewport, palette, images);
+                let posts = detail.posts.as_slice();
+                app.detail.scroll_top = {
+                    let images = app.images();
+                    clamp_scroll_top(offset, posts, width, viewport, palette, images)
+                };
                 maybe_load_more_detail(app, worker_tx);
             }
         }
@@ -282,6 +311,107 @@ fn apply_scroll_offset(
         }
         _ => {}
     }
+}
+
+fn update_selection_from_pointer(
+    app: &mut App,
+    row: u16,
+    column: u16,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    match app.page {
+        Page::ThreadFeed => update_feed_selection_from_pointer(app, row, column, worker_tx),
+        Page::ThreadDetail => update_detail_selection_from_pointer(app, row, column),
+        Page::PmList
+        | Page::Notifications
+        | Page::Search
+        | Page::MyThreads
+        | Page::MyReplies
+        | Page::Favorites => {
+            update_list_page_selection_from_pointer(app, row, column, worker_tx);
+        }
+        Page::PmThread => update_pm_thread_selection_from_pointer(app, row, column),
+        _ => {}
+    }
+}
+
+fn update_detail_selection_from_pointer(app: &mut App, row: u16, column: u16) {
+    let Some(rel_y) = content_relative_y(app, row, column) else {
+        return;
+    };
+    let Some(detail) = app.detail.detail.as_ref() else {
+        return;
+    };
+    let line = app.detail.scroll_top.saturating_add(rel_y);
+    let width = app.content_width();
+    let palette = app.palette();
+    let idx = {
+        let images = app.images();
+        floor_index_at_line(line, &detail.posts, width, palette, images)
+    };
+    if idx >= detail.posts.len() || idx == app.detail.selected {
+        return;
+    }
+    app.detail.selected = idx;
+}
+
+fn update_feed_selection_from_pointer(
+    app: &mut App,
+    row: u16,
+    column: u16,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let Some(rel_y) = content_relative_y(app, row, column) else {
+        return;
+    };
+    let idx = item_index_at_row(rel_y, app.feed.scroll_lines, ITEM_HEIGHT);
+    if idx >= app.feed.threads.len() || idx == app.feed.selected {
+        return;
+    }
+    app.feed.selected = idx;
+    app.sync_feed_scroll();
+    maybe_load_more(app, worker_tx);
+}
+
+fn update_list_page_selection_from_pointer(
+    app: &mut App,
+    row: u16,
+    column: u16,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let Some(rel_y) = content_relative_y(app, row, column) else {
+        return;
+    };
+    let item_h = list_item_height(app.page);
+    let idx = item_index_at_row(rel_y, app.list_page.scroll_lines, item_h);
+    if idx >= app.list_page.items.len() || idx == app.list_page.selected {
+        return;
+    }
+    app.list_page.selected = idx;
+    app.sync_list_scroll();
+    if let Some(kind) = app.list_page.kind {
+        maybe_load_more_list(app, worker_tx, kind);
+    }
+}
+
+fn update_pm_thread_selection_from_pointer(app: &mut App, row: u16, column: u16) {
+    let Some(rel_y) = content_relative_y(app, row, column) else {
+        return;
+    };
+    let idx = item_index_at_row(rel_y, app.pm_thread.scroll_lines, PM_ITEM_HEIGHT);
+    if idx >= app.pm_thread.messages.len() || idx == app.pm_thread.selected {
+        return;
+    }
+    app.pm_thread.selected = idx;
+    app.sync_pm_scroll();
+}
+
+fn content_relative_y(app: &App, row: u16, column: u16) -> Option<u16> {
+    let chrome = app.scroll_chrome?;
+    if !point_in(column, row, chrome.content) {
+        return None;
+    }
+    Some(row.saturating_sub(chrome.content.y))
 }
 
 fn list_max_offset(app: &App) -> u16 {

@@ -20,8 +20,10 @@ pub use composer::{
     composer_height, draw_composer, draw_confirm_dialog, ComposerFocus, ComposerProps, ConfirmProps,
 };
 pub use floor_list::{
-    clamp_scroll_top, detail_step_down, detail_step_up, draw_floor_list, ensure_scroll_top,
-    first_visible_floor, floor_list_total_height, floor_offsets, last_visible_floor, measure_floor,
+    clamp_scroll_top, detail_line_scroll, detail_step_down, detail_step_up, draw_floor_list,
+    ensure_scroll_top,
+    first_visible_floor, floor_index_at_line, floor_list_total_height, floor_offsets,
+    last_visible_floor, measure_floor,
     page_scroll_top, FloorListProps,
 };
 pub use forum_picker::{

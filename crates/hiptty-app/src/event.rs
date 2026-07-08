@@ -474,7 +474,7 @@ pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<W
     request_thread_detail(app, worker_tx, detail.page + 1, DetailFetchMode::Append);
 }
 
-fn maybe_load_more(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn maybe_load_more(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     if app.feed.loading {
         return;
     }

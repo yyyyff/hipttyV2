@@ -126,16 +126,18 @@ fn draw_overlays(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 },
             );
         }
-        Overlay::Settings => draw_settings_panel(
-            frame,
-            area,
-            SettingsProps {
-                palette,
-                settings: &app.settings,
-                selected: app.overlay_state.settings_selected,
-                blacklist_count: app.blacklist_count,
-            },
-        ),
+        Overlay::Settings => {
+            app.settings_hits = draw_settings_panel(
+                frame,
+                area,
+                SettingsProps {
+                    palette,
+                    settings: &app.settings,
+                    selected: app.overlay_state.settings_selected,
+                    blacklist_count: app.blacklist_count,
+                },
+            );
+        }
         Overlay::SearchPrompt => draw_search_prompt(
             frame,
             area,
