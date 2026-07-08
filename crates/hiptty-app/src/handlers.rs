@@ -3,7 +3,7 @@ use hiptty_core::{list_item_to_thread_summary, AdapterError, ErrorCode, ListItem
 use hiptty_widgets::MAIN_MENU_ITEMS;
 use tokio::sync::mpsc;
 
-use crate::app::{App, DetailFetchMode, DetailState, Overlay, Page};
+use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
 use crate::commands::execute_command;
 use crate::composer::{ComposerKind, ComposerState};
 use crate::list_page::ListPageKind;
@@ -25,10 +25,6 @@ pub fn handle_global_key(
         return false;
     }
     match key.code {
-        KeyCode::Char('?') => {
-            app.overlay = Overlay::Help;
-            true
-        }
         KeyCode::Char(':') => {
             app.overlay_state.command_input.clear();
             app.overlay = Overlay::CommandBar;
@@ -66,11 +62,6 @@ pub fn handle_overlay_key(
 ) {
     match app.overlay {
         Overlay::MainMenu => handle_main_menu_key(app, key, worker_tx),
-        Overlay::Help => {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                app.overlay = Overlay::None;
-            }
-        }
         Overlay::Settings => handle_settings_key(app, key, worker_tx),
         Overlay::SearchPrompt => handle_search_prompt_key(app, key, worker_tx),
         Overlay::CommandBar => handle_command_bar_key(app, key, worker_tx),
@@ -96,36 +87,45 @@ fn handle_main_menu_key(
         }
         KeyCode::Enter => {
             let selected = app.overlay_state.main_menu_selected;
-            app.overlay = Overlay::None;
-            match selected {
-                0 => {
-                    navigate_to(app, Page::PmList);
-                    request_list_page(app, worker_tx, ListPageKind::PmList, 1);
-                }
-                1 => {
-                    navigate_to(app, Page::Notifications);
-                    request_list_page(app, worker_tx, ListPageKind::Notifications, 1);
-                }
-                2 => {
-                    navigate_to(app, Page::MyThreads);
-                    request_list_page(app, worker_tx, ListPageKind::MyThreads, 1);
-                }
-                3 => {
-                    navigate_to(app, Page::MyReplies);
-                    request_list_page(app, worker_tx, ListPageKind::MyReplies, 1);
-                }
-                4 => {
-                    navigate_to(app, Page::Favorites);
-                    request_list_page(app, worker_tx, ListPageKind::Favorites, 1);
-                }
-                5 => {
-                    app.overlay_state.settings_selected = 0;
-                    app.overlay = Overlay::Settings;
-                    let _ = worker_tx.send(WorkerRequest::LoadBlacklist);
-                }
-                _ => {}
-            }
+            activate_main_menu_item(app, selected, worker_tx);
         }
+        _ => {}
+    }
+}
+
+pub fn activate_main_menu_item(
+    app: &mut App,
+    selected: usize,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    app.overlay = Overlay::None;
+    match selected {
+        0 => {
+            navigate_to(app, Page::PmList);
+            request_list_page(app, worker_tx, ListPageKind::PmList, 1);
+        }
+        1 => {
+            navigate_to(app, Page::Notifications);
+            request_list_page(app, worker_tx, ListPageKind::Notifications, 1);
+        }
+        2 => {
+            navigate_to(app, Page::MyThreads);
+            request_list_page(app, worker_tx, ListPageKind::MyThreads, 1);
+        }
+        3 => {
+            navigate_to(app, Page::MyReplies);
+            request_list_page(app, worker_tx, ListPageKind::MyReplies, 1);
+        }
+        4 => {
+            navigate_to(app, Page::Favorites);
+            request_list_page(app, worker_tx, ListPageKind::Favorites, 1);
+        }
+        5 => {
+            app.overlay_state.settings_selected = 0;
+            app.overlay = Overlay::Settings;
+            let _ = worker_tx.send(WorkerRequest::LoadBlacklist);
+        }
+        6 => app.quit = true,
         _ => {}
     }
 }
@@ -150,7 +150,7 @@ fn handle_settings_key(
         KeyCode::Enter => match app.overlay_state.settings_selected {
             0..=2 => {
                 let idx = app.overlay_state.settings_selected;
-                let forums = hiptty_widgets::forum_picker_entries(&app.settings.default_forums);
+                let forums: Vec<u32> = hiptty_core::FORUMS.iter().map(|forum| forum.id).collect();
                 let current = app.settings.default_forums[idx];
                 let next = forums
                     .iter()
@@ -621,4 +621,33 @@ fn prefetch_list_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
 
 fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
+}
+
+pub fn switch_feed_forum(app: &mut App, fid: u32, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.feed.fid == fid {
+        return;
+    }
+    app.feed = FeedState::new(fid);
+    app.feed.loading = true;
+    let _ = worker_tx.send(WorkerRequest::LoadThreads { fid, page: 1 });
+}
+
+pub fn cycle_default_forum_tab(app: &App, delta: i32) -> u32 {
+    let forums = &app.settings.default_forums;
+    let len = forums.len() as i32;
+    let idx = forums
+        .iter()
+        .position(|&fid| fid == app.feed.fid)
+        .map(|i| i as i32)
+        .unwrap_or(-1);
+    let next = if idx < 0 {
+        if delta > 0 {
+            0
+        } else {
+            (len - 1) as usize
+        }
+    } else {
+        (idx + delta).rem_euclid(len) as usize
+    };
+    forums[next]
 }

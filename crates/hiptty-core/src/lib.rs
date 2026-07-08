@@ -15,8 +15,8 @@ pub mod user;
 pub use content::{content_nodes_to_plain, ContentNode, ContentSpan, Style, TextSpan};
 pub use error::{AdapterError, AdapterResult, ErrorCode};
 pub use forum::{
-    forum_name, is_valid_forum, Forum, COOKIE_DOMAIN, DEFAULT_FORUM_IDS, FORUMS, FORUM_BASE_PATH,
-    FORUM_SERVER, IMAGE_HOST,
+    forum_children, forum_name, forum_picker_fids, is_valid_forum, Forum, COOKIE_DOMAIN,
+    DEFAULT_FORUM_IDS, FORUMS, FORUM_BASE_PATH, FORUM_SERVER, IMAGE_HOST,
 };
 pub use list::{list_item_to_thread_summary, ListItem, SimpleList};
 pub use password::processed_password;

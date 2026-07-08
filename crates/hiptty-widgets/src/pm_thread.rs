@@ -1,6 +1,6 @@
 use hiptty_core::ListItem;
 use hiptty_render::{
-    clear_content_viewport, format_relative_time, str_width, truncate_str, Palette,
+    clear_content_viewport, format_relative_time, maybe_mask_cjk, str_width, truncate_str, Palette,
 };
 use ratatui::{
     layout::Rect,
@@ -18,6 +18,7 @@ pub struct PmThreadProps<'a> {
     pub my_username: &'a str,
     pub selected: usize,
     pub scroll_lines: u16,
+    pub mask_cjk: bool,
 }
 
 pub fn pm_thread_capacity(content_height: u16) -> usize {
@@ -61,14 +62,16 @@ pub fn draw_pm_thread(frame: &mut Frame<'_>, area: Rect, props: PmThreadProps<'_
             height: draw_h,
         };
         let intra_skip = scroll.saturating_sub(item_top);
+        let selected = idx == props.selected && !props.mask_cjk;
         draw_pm_message(
             frame,
             item_area,
             msg,
             props.my_username,
-            idx == props.selected,
+            selected,
             props.palette,
             intra_skip,
+            props.mask_cjk,
         );
     }
 }
@@ -81,6 +84,7 @@ fn draw_pm_message(
     selected: bool,
     palette: Palette,
     intra_skip: u16,
+    mask_cjk: bool,
 ) {
     let is_mine = msg.author.as_deref() == Some(my_username);
     let bar_style = if is_mine {
@@ -102,18 +106,20 @@ fn draw_pm_message(
         width: area.width.saturating_sub(1),
         height: area.height.saturating_sub(1),
     };
-    let author = msg.author.as_deref().unwrap_or("?");
+    let author = maybe_mask_cjk(msg.author.as_deref().unwrap_or("?"), mask_cjk);
     let time = msg
         .time
         .as_deref()
         .map(format_relative_time)
         .unwrap_or_default();
+    let time = maybe_mask_cjk(&time, mask_cjk);
     let header = format!("{author}  {time}");
     let text = msg.title.as_deref().or(msg.info.as_deref()).unwrap_or("");
     let plain = strip_html_tags(text);
+    let plain = maybe_mask_cjk(&plain, mask_cjk);
     let width = body.width.saturating_sub(1) as usize;
-    let header = truncate_str(&header, width);
-    let body_text = truncate_str(&plain, width);
+    let header = truncate_str(header.as_ref(), width);
+    let body_text = truncate_str(plain.as_ref(), width);
 
     let header_style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)

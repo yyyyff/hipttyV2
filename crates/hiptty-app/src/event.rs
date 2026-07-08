@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use hiptty_image::thread_avatar_job;
 
-use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
+use crate::app::{App, DetailFetchMode, DetailState, Overlay, Page};
 use crate::composer::{
     delete_label, delete_post_action, edit_body, edit_header, edit_post_action, new_thread_action,
     quote_header, quote_post_action, reply_thread_action, ComposerKind, ComposerState,
@@ -18,6 +18,15 @@ use crate::handlers::{
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.toast.is_some()
+        && matches!(key.code, KeyCode::Esc | KeyCode::Enter)
+        && app.overlay == Overlay::None
+        && app.confirm_delete.is_none()
+        && app.composer.is_none()
+    {
+        app.dismiss_toast();
+        return;
+    }
     if app.confirm_delete.is_some() {
         handle_confirm_delete_key(app, key, worker_tx);
         return;
@@ -78,9 +87,8 @@ fn handle_forum_picker_key(
         }
         KeyCode::Enter => {
             if let Some(&fid) = entries.get(app.forum_picker_selected) {
-                app.feed = FeedState::new(fid);
                 app.overlay = Overlay::None;
-                request_threads(app, worker_tx, 1);
+                crate::handlers::switch_feed_forum(app, fid, worker_tx);
             }
         }
         _ => {}
@@ -218,8 +226,17 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
                 app.sync_feed_scroll();
             }
         }
+        KeyCode::Char('[') => {
+            let fid = crate::handlers::cycle_default_forum_tab(app, -1);
+            crate::handlers::switch_feed_forum(app, fid, worker_tx);
+        }
+        KeyCode::Char(']') => {
+            let fid = crate::handlers::cycle_default_forum_tab(app, 1);
+            crate::handlers::switch_feed_forum(app, fid, worker_tx);
+        }
         KeyCode::Char('f') => {
             app.overlay = Overlay::ForumPicker;
+            app.forum_picker_scroll = 0;
             let entries = app.forum_picker_fids();
             app.forum_picker_selected = entries
                 .iter()
@@ -538,7 +555,10 @@ pub fn handle_worker_response(
                 if manual {
                     app.login.error = Some(error_message(&err));
                 } else {
-                    app.toast = Some(format!("自动登录失败: {}", error_message(&err)));
+                    app.set_toast(
+                        format!("自动登录失败: {}", error_message(&err)),
+                        true,
+                    );
                     app.page = Page::Login;
                 }
             }
@@ -601,7 +621,7 @@ pub fn handle_worker_response(
                         try_auto_relogin(app, worker_tx);
                     } else {
                         app.detail.error = Some(error_message(&err));
-                        app.toast = Some(error_message(&err));
+                        app.set_toast(error_message(&err), true);
                     }
                 }
             }
@@ -629,7 +649,7 @@ pub fn handle_worker_response(
                         try_auto_relogin(app, worker_tx);
                     } else {
                         app.feed.error = Some(error_message(&err));
-                        app.toast = Some(error_message(&err));
+                        app.set_toast(error_message(&err), true);
                     }
                 }
             }
@@ -691,11 +711,11 @@ pub fn handle_worker_response(
                     let new_subject = app.composer.as_ref().map(|c| c.subject.clone());
                     app.composer = None;
                     app.confirm_delete = None;
-                    app.toast = Some(post_result.message.clone());
+                    app.set_toast(post_result.message.clone(), false);
                     apply_post_success(app, &action, delete, post_result, worker_tx, new_subject);
                 }
                 Ok(post_result) => {
-                    app.toast = Some(post_result.message);
+                    app.set_toast(post_result.message, true);
                 }
                 Err(err) => {
                     if is_auth_required(&err) {
@@ -703,18 +723,18 @@ pub fn handle_worker_response(
                         app.confirm_delete = None;
                         try_auto_relogin(app, worker_tx);
                     } else if matches!(err.code(), ErrorCode::RateLimit) {
-                        app.toast = Some(format_rate_limit(&err));
+                        app.set_toast(format_rate_limit(&err), true);
                     } else {
                         let message = error_message(&err);
                         if delete {
                             if let Some(confirm) = app.confirm_delete.as_mut() {
                                 confirm.submitting = false;
                             }
-                            app.toast = Some(message);
+                            app.set_toast(message, true);
                         } else if let Some(composer) = app.composer.as_mut() {
                             composer.error = Some(message);
                         } else {
-                            app.toast = Some(message);
+                            app.set_toast(message, true);
                         }
                     }
                 }
@@ -825,7 +845,7 @@ pub fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerR
         }));
     } else {
         app.page = Page::Login;
-        app.toast = Some("登录已过期，请重新登录".into());
+        app.set_toast("登录已过期，请重新登录", true);
     }
 }
 
@@ -1060,7 +1080,7 @@ fn open_detail_reply(app: &mut App) {
 
 fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let Some(post) = app.selected_post().cloned() else {
-        app.toast = Some("请先选择要引用的楼层".into());
+        app.set_toast("请先选择要引用的楼层", true);
         return;
     };
     let tid = app.detail.tid.clone();
@@ -1075,7 +1095,7 @@ fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequ
 
 fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let Some(post) = app.selected_post().cloned() else {
-        app.toast = Some("请先选择要编辑的楼层".into());
+        app.set_toast("请先选择要编辑的楼层", true);
         return;
     };
     let tid = app.detail.tid.clone();
@@ -1095,7 +1115,7 @@ fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReque
 
 fn open_detail_delete_confirm(app: &mut App) {
     let Some(post) = app.selected_post().cloned() else {
-        app.toast = Some("请先选择要删除的楼层".into());
+        app.set_toast("请先选择要删除的楼层", true);
         return;
     };
     let tid = app.detail.tid.clone();

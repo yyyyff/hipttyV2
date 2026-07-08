@@ -1,8 +1,8 @@
 use hiptty_core::ThreadSummary;
 use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS, AVATAR_ROWS};
 use hiptty_render::{
-    clear_content_viewport, display_title, format_count, format_relative_time, str_width,
-    truncate_str, Palette,
+    clear_content_viewport, display_title, format_count, format_relative_time, maybe_mask_cjk,
+    str_width, truncate_str, Palette,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -26,6 +26,7 @@ pub struct ThreadListProps<'a> {
     pub show_avatar: bool,
     pub loading: bool,
     pub images: Option<&'a mut ImageCache>,
+    pub mask_cjk: bool,
 }
 
 pub fn thread_list_capacity(content_height: u16) -> usize {
@@ -86,14 +87,16 @@ pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, mut props: ThreadList
             height: draw_h,
         };
         let intra_skip = scroll.saturating_sub(item_top);
+        let selected = idx == props.selected && !props.mask_cjk;
         draw_thread_item(
             frame,
             item_area,
             thread,
-            idx == props.selected,
+            selected,
             props.palette,
             props.show_avatar,
             intra_skip,
+            props.mask_cjk,
             &mut props.images,
         );
     }
@@ -107,6 +110,7 @@ fn draw_thread_item(
     palette: Palette,
     show_avatar: bool,
     intra_skip: u16,
+    mask_cjk: bool,
     images: &mut Option<&mut ImageCache>,
 ) {
     let band_h = CONTENT_ROWS.saturating_sub(intra_skip).min(area.height);
@@ -160,7 +164,7 @@ fn draw_thread_item(
             width: right_area.width,
             height: 1,
         };
-        draw_title_row(frame, row, thread, selected, palette);
+        draw_title_row(frame, row, thread, selected, palette, mask_cjk);
         text_y = text_y.saturating_add(1);
     }
     if intra_skip <= 1 && text_y < right_area.y + band_h {
@@ -170,7 +174,7 @@ fn draw_thread_item(
             width: right_area.width,
             height: 1,
         };
-        draw_meta_row(frame, row, thread, selected, palette);
+        draw_meta_row(frame, row, thread, selected, palette, mask_cjk);
     }
 }
 
@@ -180,6 +184,7 @@ fn draw_title_row(
     thread: &ThreadSummary,
     selected: bool,
     palette: Palette,
+    mask_cjk: bool,
 ) {
     let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
     let counts = build_counts(thread);
@@ -198,7 +203,7 @@ fn draw_title_row(
         ..area
     });
 
-    let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize);
+    let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize, mask_cjk);
 
     let title_style = if selected {
         palette.selected_style().bg(palette.accent_bg)
@@ -232,9 +237,10 @@ fn draw_meta_row(
     thread: &ThreadSummary,
     selected: bool,
     palette: Palette,
+    mask_cjk: bool,
 ) {
-    let author = build_author_line(thread);
-    let time = build_time_line(thread);
+    let author = build_author_line(thread, mask_cjk);
+    let time = maybe_mask_cjk(&build_time_line(thread), mask_cjk).into_owned();
     let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
 
     let meta_style = if selected {
@@ -294,21 +300,26 @@ fn draw_meta_row(
     );
 }
 
-fn build_title_with_icons(thread: &ThreadSummary, max_cols: usize) -> String {
+fn build_title_with_icons(thread: &ThreadSummary, max_cols: usize, mask_cjk: bool) -> String {
     if max_cols == 0 {
         return String::new();
     }
 
-    let title = display_title(&thread.title);
+    let raw_title = display_title(&thread.title);
+    let title = maybe_mask_cjk(&raw_title, mask_cjk);
     let icons = build_status_icons(thread);
     if icons.is_empty() {
-        return truncate_str(&title, max_cols);
+        return truncate_str(title.as_ref(), max_cols);
     }
 
     let icon_suffix = format!(" {icons}");
     let icon_w = str_width(&icon_suffix);
     let title_budget = max_cols.saturating_sub(icon_w);
-    format!("{}{}", truncate_str(&title, title_budget), icon_suffix)
+    format!(
+        "{}{}",
+        truncate_str(title.as_ref(), title_budget),
+        icon_suffix
+    )
 }
 
 fn build_status_icons(thread: &ThreadSummary) -> String {
@@ -325,14 +336,17 @@ fn build_status_icons(thread: &ThreadSummary) -> String {
     parts.join(" ")
 }
 
-fn build_author_line(thread: &ThreadSummary) -> String {
-    let author = thread.author.as_deref().unwrap_or("?");
+fn build_author_line(thread: &ThreadSummary, mask_cjk: bool) -> String {
+    let author = maybe_mask_cjk(thread.author.as_deref().unwrap_or("?"), mask_cjk);
     thread
         .thread_type
         .as_deref()
         .filter(|t| !t.is_empty())
-        .map(|t| format!("{author} · {t}"))
-        .unwrap_or_else(|| author.to_string())
+        .map(|t| {
+            let kind = maybe_mask_cjk(t, mask_cjk);
+            format!("{} · {}", author, kind)
+        })
+        .unwrap_or_else(|| author.into_owned())
 }
 
 fn build_counts(thread: &ThreadSummary) -> String {
@@ -423,14 +437,14 @@ mod tests {
     fn new_marker_omitted() {
         let thread = sample_thread();
         assert!(!build_status_icons(&thread).contains("NEW"));
-        let title = build_title_with_icons(&thread, 80);
+        let title = build_title_with_icons(&thread, 80, false);
         assert!(!title.contains("NEW"));
     }
 
     #[test]
     fn status_icons_follow_title() {
         let thread = sample_thread();
-        let title = build_title_with_icons(&thread, 80);
+        let title = build_title_with_icons(&thread, 80, false);
         assert!(title.contains('\u{f08d}'));
         assert!(title.contains('\u{f03e}'));
         let title_end = title.find('\u{f08d}').unwrap();
@@ -459,7 +473,7 @@ mod tests {
     #[test]
     fn meta_parts_respect_width() {
         let thread = sample_thread();
-        let author = build_author_line(&thread);
+        let author = build_author_line(&thread, false);
         let counts = build_counts(&thread);
         assert!(str_width(&author) <= 20);
         assert!(str_width(&counts) <= 30);

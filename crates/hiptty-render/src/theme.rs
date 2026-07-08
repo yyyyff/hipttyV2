@@ -8,6 +8,8 @@ pub struct Palette {
     pub muted: Color,
     pub accent: Color,
     pub accent_bg: Color,
+    /// Near-black wash behind modal overlays; darker than [`accent_bg`].
+    pub modal_backdrop: Color,
     pub link: Color,
     pub success: Color,
     pub warn: Color,
@@ -61,6 +63,35 @@ impl Palette {
             .fg(self.accent)
             .add_modifier(Modifier::BOLD)
     }
+
+    pub fn modal_backdrop_style(self) -> Style {
+        Style::default()
+            .fg(self.modal_backdrop)
+            .bg(self.modal_backdrop)
+    }
+
+    pub fn modal_surface_style(self) -> Style {
+        Style::default().bg(self.accent_bg)
+    }
+
+    /// Muted copy for page chrome drawn behind an open overlay (simulates translucency).
+    pub fn dimmed(self) -> Self {
+        const FACTOR: f32 = 0.28;
+        Self {
+            foreground: scale_color(self.foreground, FACTOR),
+            secondary: scale_color(self.secondary, FACTOR),
+            muted: scale_color(self.muted, FACTOR),
+            accent: scale_color(self.accent, FACTOR * 1.1),
+            accent_bg: self.accent_bg,
+            modal_backdrop: self.modal_backdrop,
+            link: scale_color(self.link, FACTOR),
+            success: scale_color(self.success, FACTOR),
+            warn: scale_color(self.warn, FACTOR),
+            error: scale_color(self.error, FACTOR),
+            logo_hi: scale_color(self.logo_hi, FACTOR),
+            logo_lo: scale_color(self.logo_lo, FACTOR),
+        }
+    }
 }
 
 impl Default for Palette {
@@ -71,6 +102,7 @@ impl Default for Palette {
             muted: Color::Rgb(73, 84, 149),
             accent: Color::Rgb(255, 126, 219),
             accent_bg: Color::Rgb(54, 27, 47),
+            modal_backdrop: Color::Rgb(22, 12, 28),
             link: Color::Rgb(54, 249, 246),
             success: Color::Rgb(114, 241, 184),
             warn: Color::Rgb(254, 222, 93),
@@ -134,4 +166,14 @@ fn color_to_rgb(color: Color) -> (u8, u8, u8) {
         Color::Rgb(r, g, b) => (r, g, b),
         _ => (234, 0, 217),
     }
+}
+
+fn scale_color(color: Color, factor: f32) -> Color {
+    let (r, g, b) = color_to_rgb(color);
+    let factor = factor.clamp(0.0, 1.0);
+    Color::Rgb(
+        (r as f32 * factor).round() as u8,
+        (g as f32 * factor).round() as u8,
+        (b as f32 * factor).round() as u8,
+    )
 }

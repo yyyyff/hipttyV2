@@ -4,8 +4,8 @@ use hiptty_image::{
     ImageKind, ImageState, AVATAR_COLS, IMAGE_FAIL_LABEL,
 };
 use hiptty_render::{
-    clear_content_viewport, floor_header_rows, format_signature, render_post_content_lines,
-    str_width, Palette,
+    clear_content_viewport, floor_header_rows, format_signature, mask_line_cjk, maybe_mask_cjk,
+    render_post_content_lines, str_width, Palette,
 };
 use ratatui::{
     layout::{Alignment, Rect},
@@ -28,6 +28,7 @@ pub struct FloorListProps<'a> {
     pub scroll_top: u16,
     pub show_avatar: bool,
     pub images: Option<&'a mut ImageCache>,
+    pub mask_cjk: bool,
 }
 
 fn content_height(post: &Post, body_w: u16, palette: Palette, images: Option<&ImageCache>) -> u16 {
@@ -309,7 +310,10 @@ pub fn page_scroll_top(
 }
 
 pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListProps<'_>) {
-    if area.height == 0 || area.width < 8 || props.posts.is_empty() {
+    if area.height == 0 || area.width < 8 {
+        return;
+    }
+    if props.posts.is_empty() {
         return;
     }
     clear_content_viewport(frame, area);
@@ -356,7 +360,7 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
                 height: draw_h,
             },
             post,
-            idx == props.selected,
+            idx == props.selected && !props.mask_cjk,
             props.palette,
             props.show_avatar,
             &mut props.images,
@@ -364,6 +368,7 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
             logical_top,
             skip_lines,
             idx + 1 < props.posts.len(),
+            props.mask_cjk,
         );
 
         logical_top = floor_bottom;
@@ -384,6 +389,7 @@ fn draw_floor(
     floor_top: u16,
     skip_lines: u16,
     draw_separator: bool,
+    mask_cjk: bool,
 ) {
     let body = Rect {
         x: area.x + BAR_W,
@@ -396,13 +402,16 @@ fn draw_floor(
         .width
         .saturating_sub(if show_avatar { AVATAR_W } else { 0 });
 
+    let author = maybe_mask_cjk(&post.author, mask_cjk);
     let (mut row1, row2) = floor_header_rows(
-        &post.author,
+        author.as_ref(),
         post.floor,
         &post.time,
         text_w as usize,
         palette,
     );
+    row1 = mask_line_cjk(row1, mask_cjk);
+    let row2 = mask_line_cjk(row2, mask_cjk);
     if post.warned {
         row1.spans.insert(
             0,
@@ -479,6 +488,7 @@ fn draw_floor(
             &row2,
             post.signature.as_deref(),
             palette,
+            mask_cjk,
         );
     }
     if show_avatar {
@@ -553,8 +563,8 @@ fn draw_floor(
                 if !next_visible_row(frame, &mut y, &mut line_idx, true) {
                     break 'content;
                 }
-                let mut prefixed = ratatui::text::Line::from(vec![ratatui::text::Span::raw(" ")]);
-                prefixed.spans.extend(line.spans.clone());
+                let mut prefixed = mask_line_cjk(line.clone(), mask_cjk);
+                prefixed.spans.insert(0, ratatui::text::Span::raw(" "));
                 frame.render_widget(
                     Paragraph::new(prefixed),
                     Rect {
@@ -723,6 +733,7 @@ fn draw_meta_row2(
     time_line: &ratatui::text::Line<'_>,
     signature: Option<&str>,
     palette: Palette,
+    mask_cjk: bool,
 ) {
     let time_text: String = time_line.spans.iter().map(|s| s.content.as_ref()).collect();
     let time_w = str_width(&time_text);
@@ -731,7 +742,8 @@ fn draw_meta_row2(
         .filter(|s| !s.is_empty())
         .map(|s| {
             let budget = area.width.saturating_sub(time_w as u16 + 2) as usize;
-            format_signature(s, budget.max(8))
+            let sig = format_signature(s, budget.max(8));
+            maybe_mask_cjk(&sig, mask_cjk).into_owned()
         })
         .unwrap_or_default();
     let sig_w = str_width(&sig);

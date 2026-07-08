@@ -159,34 +159,31 @@ pub struct ConfirmProps<'a> {
 
 pub fn draw_confirm_dialog(frame: &mut Frame<'_>, area: Rect, props: ConfirmProps<'_>) {
     let width = area.width.min(48);
-    let height = 7;
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    let dialog = Rect {
-        x,
-        y,
+    let height = 8;
+    let modal = crate::modal::begin_modal(
+        frame,
+        area,
+        props.palette,
+        props.title,
         width,
         height,
-    };
-    frame.render_widget(Clear, dialog);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(props.palette.accent_style())
-        .title(props.title);
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
-    let chunks = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).split(inner);
+        None,
+    );
+    let chunks = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).split(modal.body);
     frame.render_widget(
         Paragraph::new(props.message).style(props.palette.foreground_style()),
         chunks[0],
     );
-    let actions = if props.loading {
-        "删除中..."
+    if props.loading {
+        frame.render_widget(
+            Paragraph::new("删除中...").style(props.palette.muted_style()),
+            chunks[1],
+        );
     } else {
-        "y 确认  n/Esc 取消"
-    };
-    frame.render_widget(
-        Paragraph::new(actions).style(props.palette.secondary_style()),
-        chunks[1],
-    );
+        let actions = Line::from(vec![
+            Span::styled(" [ 确认 (y) ] ", props.palette.accent_style()),
+            Span::styled(" [ 取消 (n) ] ", props.palette.secondary_style()),
+        ]);
+        frame.render_widget(Paragraph::new(actions), chunks[1]);
+    }
 }

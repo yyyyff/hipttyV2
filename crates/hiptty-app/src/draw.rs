@@ -2,13 +2,14 @@ use hiptty_core::{forum_name, list_item_to_thread_summary};
 use hiptty_render::{clear_graphics_in_area, fill_area_spaces};
 use hiptty_widgets::{
     draw_command_bar, draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list,
-    draw_forum_picker, draw_help_overlay, draw_loading_indicator, draw_login, draw_main_menu,
+    draw_forum_picker, draw_loading_indicator, draw_login, draw_main_menu,
     draw_pm_thread, draw_search_prompt, draw_settings_panel, draw_simple_list, draw_startup,
-    draw_status_bar, draw_thread_list, draw_title_bar, draw_vertical_scrollbar, list_content_lines,
-    main_layout, title_bar_hits, ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps,
-    HelpOverlayProps, LoginFormProps, MainMenuProps, PmThreadProps, SearchPromptProps,
-    SettingsProps, SimpleListProps, StartupProps, ThreadListProps, TitleBarProps, ITEM_HEIGHT,
-    PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
+    draw_status_bar, draw_thread_list, draw_title_bar, draw_toast, draw_vertical_scrollbar,
+    list_content_lines, main_layout, title_bar_hits, ComposerProps, ConfirmProps, FloorListProps,
+    ForumPickerProps, ForumTabsProps, LoginFormProps, MainMenuProps,
+    PmThreadProps,
+    SearchPromptProps, SettingsProps, SimpleListProps, StartupProps, ThreadListProps,
+    TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -96,22 +97,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if let Some(toast) = &app.toast {
-        draw_toast(frame, area, app, toast);
+        draw_toast(
+            frame,
+            area,
+            ToastProps {
+                palette: app.palette(),
+                message: &toast.message,
+                is_error: toast.is_error,
+                tick: app.tick,
+                started_at: toast.started_at,
+                duration_ticks: toast.duration_ticks,
+            },
+        );
     }
 }
 
-fn draw_overlays(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_overlays(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let palette = app.palette();
+    app.main_menu_hits.clear();
     match app.overlay {
-        Overlay::MainMenu => draw_main_menu(
-            frame,
-            area,
-            MainMenuProps {
-                palette,
-                selected: app.overlay_state.main_menu_selected,
-            },
-        ),
-        Overlay::Help => draw_help_overlay(frame, area, HelpOverlayProps { palette }),
+        Overlay::MainMenu => {
+            app.main_menu_hits = draw_main_menu(
+                frame,
+                area,
+                MainMenuProps {
+                    palette,
+                    selected: app.overlay_state.main_menu_selected,
+                },
+            );
+        }
         Overlay::Settings => draw_settings_panel(
             frame,
             area,
@@ -145,14 +159,30 @@ fn draw_overlays(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn shell_title_bar(frame: &mut Frame<'_>, app: &mut App, title_area: Rect, right: Option<&str>) {
     app.title_bar_area = title_area;
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
+    let default_forums = app.settings.default_forums;
+    let forum_tabs = if app.page == Page::ThreadFeed {
+        Some(ForumTabsProps {
+            palette,
+            default_forums: &default_forums,
+            active_fid: app.feed.fid,
+            hover_tab: app.forum_tab_hover,
+            mask_cjk,
+        })
+    } else {
+        None
+    };
     let props = TitleBarProps {
-        palette: app.palette(),
+        palette,
         tick: app.tick,
         username: app.session.username.as_deref(),
         has_notifications: app.unread.has_notifications,
         has_pm: app.unread.has_pm,
         breadcrumb: &app.breadcrumb(),
         breadcrumb_right: right,
+        forum_tabs,
+        mask_cjk,
     };
     app.title_bar_hits = title_bar_hits(title_area, &props);
     draw_title_bar(frame, title_area, props);
@@ -171,7 +201,7 @@ fn repaint_title_chrome(
     fill_area_spaces(frame, title_area);
     fill_area_spaces(frame, title_rule);
     shell_title_bar(frame, app, title_area, right);
-    draw_dim_rule(frame, title_rule, app.palette());
+    draw_dim_rule(frame, title_rule, app.content_palette());
 }
 
 fn paint_scroll_area(
@@ -184,7 +214,7 @@ fn paint_scroll_area(
     let content = install_scroll_chrome(app, full_content, content_len, offset);
     if let Some(chrome) = app.scroll_chrome {
         if chrome.shown {
-            draw_vertical_scrollbar(frame, chrome.bar, app.palette(), chrome.lengths(), offset);
+            draw_vertical_scrollbar(frame, chrome.bar, app.content_palette(), chrome.lengths(), offset);
         }
     }
     content
@@ -232,7 +262,8 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let palette = app.palette();
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
     let [title_area, title_rule, content_area, status_rule, status_area] = main_layout(area);
 
     shell_title_bar(frame, app, title_area, None);
@@ -254,6 +285,7 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 show_avatar: true,
                 loading: feed.loading,
                 images,
+                mask_cjk,
             },
         );
     }
@@ -268,16 +300,21 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     draw_status_bar(frame, status_area, palette, app.status_hints());
 
     if app.overlay == Overlay::ForumPicker {
-        draw_forum_picker(
+        let frame_state = draw_forum_picker(
             frame,
             area,
             ForumPickerProps {
-                palette,
+                palette: app.palette(),
                 default_forums: &app.settings.default_forums,
                 selected: app.forum_picker_selected,
                 current_fid: app.feed.fid,
+                scroll_offset: app.forum_picker_scroll,
             },
         );
+        app.forum_picker_scroll = frame_state.scroll_offset;
+        app.forum_picker_hits = frame_state.hits;
+    } else {
+        app.forum_picker_hits.clear();
     }
 }
 
@@ -285,7 +322,8 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let palette = app.palette();
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
     let chunks = main_layout(area);
     let counts = app.detail_title_counts();
     let show_loading = app.detail.loading || app.detail.loading_more;
@@ -330,6 +368,7 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         scroll_top: detail_state.scroll_top,
                         show_avatar: true,
                         images,
+                        mask_cjk,
                     },
                 );
             }
@@ -348,7 +387,8 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
-    let palette = app.palette();
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
     let chunks = main_layout(area);
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
@@ -372,6 +412,7 @@ fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
             scroll_lines: app.list_page.scroll_lines,
             show_avatar,
             images,
+            mask_cjk,
         },
     );
     if app.list_page.loading {
@@ -385,7 +426,8 @@ fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
 }
 
 fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
-    let palette = app.palette();
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
     let chunks = main_layout(area);
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
@@ -416,6 +458,7 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
             show_avatar,
             loading: app.list_page.loading,
             images,
+            mask_cjk,
         },
     );
     if app.list_page.loading {
@@ -429,7 +472,8 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
 }
 
 fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let palette = app.palette();
+    let palette = app.content_palette();
+    let mask_cjk = app.dims_background();
     let chunks = main_layout(area);
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
@@ -451,6 +495,7 @@ fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             my_username: app.session.username.as_deref().unwrap_or(""),
             selected: app.pm_thread.selected,
             scroll_lines: app.pm_thread.scroll_lines,
+            mask_cjk,
         },
     );
     if app.pm_thread.loading {
@@ -482,25 +527,4 @@ fn draw_list_error(
     }
 }
 
-fn draw_toast(frame: &mut Frame<'_>, area: Rect, app: &App, message: &str) {
-    let width = (message.chars().count() as u16 + 4).min(area.width.saturating_sub(4));
-    let height = 3;
-    let x = area.x + area.width.saturating_sub(width + 2);
-    let y = area.y + area.height.saturating_sub(height + 2);
-    let style = if app.toast_is_error {
-        app.palette().error_style()
-    } else {
-        app.palette().success_style()
-    };
-    frame.render_widget(
-        Paragraph::new(message)
-            .style(style)
-            .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL)),
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        },
-    );
-}
+

@@ -1,7 +1,7 @@
 use hiptty_core::ListItem;
 use hiptty_image::{draw_avatar_entry, ImageCache, AVATAR_COLS, AVATAR_ROWS};
 use hiptty_render::{
-    clear_content_viewport, format_relative_time, str_width, truncate_str, Palette,
+    clear_content_viewport, format_relative_time, maybe_mask_cjk, str_width, truncate_str, Palette,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -20,6 +20,7 @@ pub struct SimpleListProps<'a> {
     pub scroll_lines: u16,
     pub show_avatar: bool,
     pub images: Option<&'a mut ImageCache>,
+    pub mask_cjk: bool,
 }
 
 pub fn simple_list_capacity(content_height: u16) -> usize {
@@ -63,14 +64,16 @@ pub fn draw_simple_list(frame: &mut Frame<'_>, area: Rect, mut props: SimpleList
             height: draw_h,
         };
         let intra_skip = scroll.saturating_sub(item_top);
+        let selected = idx == props.selected && !props.mask_cjk;
         draw_simple_item(
             frame,
             item_area,
             item,
-            idx == props.selected,
+            selected,
             props.palette,
             props.show_avatar,
             intra_skip,
+            props.mask_cjk,
             &mut props.images,
         );
     }
@@ -84,6 +87,7 @@ fn draw_simple_item(
     palette: Palette,
     show_avatar: bool,
     intra_skip: u16,
+    mask_cjk: bool,
     images: &mut Option<&mut ImageCache>,
 ) {
     const CONTENT_ROWS: u16 = 2;
@@ -133,8 +137,11 @@ fn draw_simple_item(
 
     let text_w = cols[1].width.saturating_sub(1) as usize;
     let new_mark = if item.is_new { "● " } else { "  " };
-    let author = item.author.as_deref().unwrap_or("系统");
-    let preview = item.title.as_deref().or(item.info.as_deref()).unwrap_or("");
+    let author = maybe_mask_cjk(item.author.as_deref().unwrap_or("系统"), mask_cjk);
+    let preview = maybe_mask_cjk(
+        item.title.as_deref().or(item.info.as_deref()).unwrap_or(""),
+        mask_cjk,
+    );
     let line1 = format!("{new_mark}{author}  {preview}");
     let line1 = truncate_str(&line1, text_w);
     let time = item
@@ -142,7 +149,7 @@ fn draw_simple_item(
         .as_deref()
         .map(format_relative_time)
         .unwrap_or_default();
-    let line2 = truncate_str(&time, text_w);
+    let line2 = truncate_str(maybe_mask_cjk(&time, mask_cjk).as_ref(), text_w);
 
     let line1_style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)

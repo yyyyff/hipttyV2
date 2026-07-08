@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, MouseClickState, Overlay, Page};
 use crate::event::{maybe_load_more_detail, open_thread_detail};
-use crate::handlers::{maybe_load_more_list, open_list_selection};
+use crate::handlers::{
+    activate_main_menu_item, maybe_load_more_list, open_list_selection, switch_feed_forum,
+};
 use crate::list_page::ListPageKind;
 use crate::nav::navigate_to;
 use crate::worker::WorkerRequest;
@@ -23,9 +25,19 @@ pub fn handle_mouse(
     event: MouseEvent,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
-    if app.overlay != Overlay::None && app.overlay != Overlay::ForumPicker {
+    if app.overlay == Overlay::MainMenu {
+        handle_main_menu_mouse(app, event, worker_tx);
         return;
     }
+    if app.overlay == Overlay::ForumPicker {
+        handle_forum_picker_mouse(app, event, worker_tx);
+        return;
+    }
+    if app.overlay != Overlay::None {
+        return;
+    }
+
+    update_forum_tab_hover(app, event);
 
     if let Some(action) = title_bar_action(app, event) {
         apply_title_action(app, action, worker_tx);
@@ -46,6 +58,68 @@ pub fn handle_mouse(
 enum TitleAction {
     Notifications,
     PmList,
+    ForumTab(usize),
+}
+
+fn handle_forum_picker_mouse(
+    app: &mut App,
+    event: MouseEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    update_forum_tab_hover(app, event);
+    if let Some(index) = forum_picker_index_at(app, event.column, event.row) {
+        app.forum_picker_selected = index;
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(&fid) = app.forum_picker_fids().get(index) {
+                app.overlay = Overlay::None;
+                switch_feed_forum(app, fid, worker_tx);
+            }
+        }
+    }
+}
+
+fn forum_picker_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
+    app.forum_picker_hits
+        .iter()
+        .find(|hit| point_in(column, row, hit.area))
+        .map(|hit| hit.entry_index)
+}
+
+fn update_forum_tab_hover(app: &mut App, event: MouseEvent) {
+    if app.page != Page::ThreadFeed {
+        app.forum_tab_hover = None;
+        return;
+    }
+    app.forum_tab_hover = None;
+    for (i, tab) in app.title_bar_hits.forum_tabs.tabs.iter().enumerate() {
+        if let Some(r) = tab {
+            if point_in(event.column, event.row, *r) {
+                app.forum_tab_hover = Some(i);
+                return;
+            }
+        }
+    }
+}
+
+fn handle_main_menu_mouse(
+    app: &mut App,
+    event: MouseEvent,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    if let Some(index) = main_menu_index_at(app, event.column, event.row) {
+        app.overlay_state.main_menu_selected = index;
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            activate_main_menu_item(app, index, worker_tx);
+        }
+    }
+}
+
+fn main_menu_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
+    app.main_menu_hits
+        .iter()
+        .enumerate()
+        .find(|(_, hit)| point_in(column, row, **hit))
+        .map(|(i, _)| i)
 }
 
 fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
@@ -60,6 +134,13 @@ fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
     if let Some(r) = app.title_bar_hits.pm {
         if point_in(event.column, event.row, r) {
             return Some(TitleAction::PmList);
+        }
+    }
+    if app.page == Page::ThreadFeed
+        && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+    {
+        if let Some(index) = app.forum_tab_hover {
+            return Some(TitleAction::ForumTab(index));
         }
     }
     None
@@ -79,6 +160,12 @@ fn apply_title_action(
         TitleAction::PmList => {
             navigate_to(app, Page::PmList);
             request_list_page(app, worker_tx, ListPageKind::PmList, 1);
+        }
+        TitleAction::ForumTab(index) => {
+            if let Some(&fid) = app.settings.default_forums.get(index) {
+                app.overlay = Overlay::None;
+                switch_feed_forum(app, fid, worker_tx);
+            }
         }
     }
 }

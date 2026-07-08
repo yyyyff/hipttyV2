@@ -1,10 +1,11 @@
-use hiptty_render::{str_width, truncate_str, Palette};
+use hiptty_render::{maybe_mask_cjk, str_width, truncate_str, Palette};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     widgets::Paragraph,
     Frame,
 };
 
+use crate::forum_tabs::{draw_forum_tabs, forum_tab_hits, ForumTabHits, ForumTabsProps};
 use crate::layout::title_bar_rows;
 use crate::logo::draw_title_logo;
 
@@ -16,23 +17,31 @@ pub struct TitleBarProps<'a> {
     pub has_pm: bool,
     pub breadcrumb: &'a str,
     pub breadcrumb_right: Option<&'a str>,
+    pub forum_tabs: Option<ForumTabsProps<'a>>,
+    pub mask_cjk: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TitleBarHits {
     pub notifications: Option<Rect>,
     pub pm: Option<Rect>,
+    pub forum_tabs: ForumTabHits,
 }
 
 pub fn title_bar_hits(area: Rect, props: &TitleBarProps<'_>) -> TitleBarHits {
-    let [row1, _] = title_bar_rows(area);
+    let [row1, row2] = title_bar_rows(area);
     if row1.width == 0 {
         return TitleBarHits::default();
     }
 
+    let mut hits = TitleBarHits::default();
+    if let Some(tabs) = props.forum_tabs.as_ref() {
+        hits.forum_tabs = forum_tab_hits(row2, tabs);
+    }
+
     let has_user = props.username.is_some();
     if !has_user && !props.has_notifications && !props.has_pm {
-        return TitleBarHits::default();
+        return hits;
     }
 
     let mut right = String::new();
@@ -54,7 +63,6 @@ pub fn title_bar_hits(area: Rect, props: &TitleBarProps<'_>) -> TitleBarHits {
 
     let total_w = str_width(&right).min(row1.width as usize) as u16;
     let mut x = row1.x.saturating_add(row1.width.saturating_sub(total_w));
-    let mut hits = TitleBarHits::default();
 
     if let Some(user) = props.username {
         x = x.saturating_add(str_width(user).min(row1.width as usize) as u16);
@@ -120,6 +128,11 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
         );
     }
 
+    if let Some(tabs) = props.forum_tabs {
+        draw_forum_tabs(frame, row2, tabs);
+        return;
+    }
+
     let right_w = props
         .breadcrumb_right
         .map(|t| str_width(t).min(row2.width as usize) as u16 + 1)
@@ -130,7 +143,7 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
     ])
     .split(row2);
     let breadcrumb = truncate_str(
-        props.breadcrumb,
+        maybe_mask_cjk(props.breadcrumb, props.mask_cjk).as_ref(),
         row2_cols[0].width.saturating_sub(1) as usize,
     );
     frame.render_widget(
@@ -141,7 +154,7 @@ pub fn draw_title_bar(frame: &mut Frame<'_>, area: Rect, props: TitleBarProps<'_
     if let Some(right_text) = props.breadcrumb_right {
         frame.render_widget(
             Paragraph::new(truncate_str(
-                right_text,
+                maybe_mask_cjk(right_text, props.mask_cjk).as_ref(),
                 row2_cols[1].width.saturating_sub(1) as usize,
             ))
             .style(props.palette.secondary_style())

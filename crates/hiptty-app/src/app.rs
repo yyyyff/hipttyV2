@@ -7,7 +7,7 @@ use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
     clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets, forum_picker_entries,
     snap_scroll_to_item, thread_list_capacity, LoginField, ScrollBarInteraction, ScrollChrome,
-    TitleBarHits, SCROLLBAR_COLS,
+    TitleBarHits, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS, SCROLLBAR_COLS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -57,12 +57,19 @@ pub enum Page {
     Favorites,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToastState {
+    pub message: String,
+    pub is_error: bool,
+    pub started_at: u64,
+    pub duration_ticks: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     None,
     ForumPicker,
     MainMenu,
-    Help,
     Settings,
     SearchPrompt,
     CommandBar,
@@ -179,12 +186,13 @@ pub struct App {
     pub feed: FeedState,
     pub detail: DetailState,
     pub forum_picker_selected: usize,
+    pub forum_picker_scroll: usize,
+    pub forum_picker_hits: Vec<hiptty_widgets::ForumPickerHit>,
+    pub forum_tab_hover: Option<usize>,
     pub tick: u64,
     pub viewport_width: u16,
     pub viewport_height: u16,
-    pub toast: Option<String>,
-    pub toast_until: Option<u64>,
-    pub toast_is_error: bool,
+    pub toast: Option<ToastState>,
     pub composer: Option<ComposerState>,
     pub confirm_delete: Option<ConfirmDeleteState>,
     pub nav_stack: NavStack,
@@ -205,6 +213,7 @@ pub struct App {
     pub scrollbar_interaction: ScrollBarInteraction,
     pub title_bar_area: ratatui::layout::Rect,
     pub title_bar_hits: TitleBarHits,
+    pub main_menu_hits: Vec<ratatui::layout::Rect>,
     pub last_click: Option<MouseClickState>,
 }
 
@@ -239,12 +248,13 @@ impl App {
                 error: None,
             },
             forum_picker_selected: 0,
+            forum_picker_scroll: 0,
+            forum_picker_hits: Vec::new(),
+            forum_tab_hover: None,
             tick: 0,
             viewport_width: 80,
             viewport_height: 24,
             toast: None,
-            toast_until: None,
-            toast_is_error: false,
             composer: None,
             confirm_delete: None,
             nav_stack: NavStack::default(),
@@ -264,6 +274,7 @@ impl App {
             scrollbar_interaction: ScrollBarInteraction::new(),
             title_bar_area: ratatui::layout::Rect::default(),
             title_bar_hits: TitleBarHits::default(),
+            main_menu_hits: Vec::new(),
             last_click: None,
         }
     }
@@ -303,10 +314,22 @@ impl App {
         Palette::default()
     }
 
+    pub fn dims_background(&self) -> bool {
+        self.overlay != Overlay::None || self.confirm_delete.is_some()
+    }
+
+    pub fn content_palette(&self) -> Palette {
+        if self.dims_background() {
+            self.palette().dimmed()
+        } else {
+            self.palette()
+        }
+    }
+
     pub fn breadcrumb(&self) -> String {
         match self.page {
             Page::Startup | Page::Login => String::new(),
-            Page::ThreadFeed => forum_name(self.feed.fid).unwrap_or("Forum").to_string(),
+            Page::ThreadFeed => String::new(),
             Page::ThreadDetail => self.detail_breadcrumb(),
             Page::PmList => "私信".into(),
             Page::PmThread => format!("私信 · {}", self.pm_thread.peer_name),
@@ -325,24 +348,31 @@ impl App {
     }
 
     pub fn set_toast(&mut self, message: impl Into<String>, is_error: bool) {
-        let msg = message.into();
-        self.toast = Some(msg);
-        self.toast_is_error = is_error;
-        self.toast_until = if is_error {
-            None
+        let duration_ticks = if is_error {
+            TOAST_ERROR_TICKS
         } else {
-            Some(self.tick.saturating_add(40))
+            TOAST_SUCCESS_TICKS
         };
+        self.toast = Some(ToastState {
+            message: message.into(),
+            is_error,
+            started_at: self.tick,
+            duration_ticks,
+        });
     }
 
     pub fn poll_toast(&mut self) {
-        if let Some(until) = self.toast_until {
-            if self.tick >= until {
-                self.toast = None;
-                self.toast_until = None;
-                self.toast_is_error = false;
-            }
+        let expired = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| self.tick >= toast.started_at.saturating_add(toast.duration_ticks));
+        if expired {
+            self.toast = None;
         }
+    }
+
+    pub fn dismiss_toast(&mut self) {
+        self.toast = None;
     }
 
     pub fn status_hints(&self) -> &'static str {
@@ -354,8 +384,7 @@ impl App {
         }
         match self.overlay {
             Overlay::ForumPicker => "j/k  Enter  Esc",
-            Overlay::MainMenu => "j/k  Enter  Esc",
-            Overlay::Help => "Enter / Esc 关闭",
+            Overlay::MainMenu => "",
             Overlay::Settings => "j/k  Enter  Esc",
             Overlay::SearchPrompt => "Enter 搜索  Esc 取消",
             Overlay::CommandBar => "Enter 执行  Esc 取消",
@@ -363,7 +392,7 @@ impl App {
                 Page::Startup => "Esc 退出",
                 Page::Login => "Tab/↑↓ 切换 · Enter 确认 · Esc 退出",
                 Page::ThreadFeed => {
-                    "j/k ↑↓  Enter 打开  r 回复  n 新帖  f 版块  / 搜索  Esc 菜单  ? 帮助  : 命令"
+                    "j/k ↑↓  Enter 打开  [ ] 版块  f 更多  r 回复  n 新帖  / 搜索  Esc 菜单  : 命令"
                 }
                 Page::ThreadDetail => {
                     "j/k ↑↓  PgUp/Dn  r 回复  q 引用  e 编辑  d 删除  g/G 首页/末页  b 返回"
@@ -402,7 +431,7 @@ impl App {
     }
 
     pub fn forum_picker_fids(&self) -> Vec<u32> {
-        forum_picker_entries(&self.settings.default_forums)
+        forum_picker_entries(self.feed.fid, &self.settings.default_forums)
     }
 
     /// Main content height below the 2-row title, two rules, and status bar.

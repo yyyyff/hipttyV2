@@ -2,6 +2,61 @@ pub fn str_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
+pub fn is_cjk_char(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x2E80..=0x2EFF
+            | 0x2F00..=0x2FDF
+            | 0x3000..=0x303F
+            | 0x3040..=0x309F
+            | 0x30A0..=0x30FF
+            | 0x3100..=0x312F
+            | 0x3130..=0x318F
+            | 0x3190..=0x319F
+            | 0x31A0..=0x31BF
+            | 0x31C0..=0x31EF
+            | 0x3200..=0x32FF
+            | 0x3300..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7AF
+            | 0xD7B0..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+    )
+}
+
+pub fn mask_cjk(s: &str) -> String {
+    s.chars()
+        .map(|ch| if is_cjk_char(ch) { ' ' } else { ch })
+        .collect()
+}
+
+pub fn mask_line_cjk(line: ratatui::text::Line<'_>, mask: bool) -> ratatui::text::Line<'_> {
+    if !mask {
+        return line;
+    }
+    ratatui::text::Line::from(
+        line.spans
+            .iter()
+            .map(|span| {
+                ratatui::text::Span::styled(mask_cjk(span.content.as_ref()), span.style)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub fn maybe_mask_cjk<'a>(s: &'a str, mask: bool) -> std::borrow::Cow<'a, str> {
+    if mask {
+        std::borrow::Cow::Owned(mask_cjk(s))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 pub fn truncate_str(s: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
@@ -163,5 +218,11 @@ mod tests {
     fn relative_time_passthrough() {
         assert_eq!(format_relative_time("刚刚"), "刚刚");
         assert_eq!(format_relative_time("5分钟前"), "5分钟前");
+    }
+
+    #[test]
+    fn mask_cjk_replaces_han() {
+        assert_eq!(mask_cjk("Hello 世界"), "Hello   ");
+        assert_eq!(mask_cjk("Discovery"), "Discovery");
     }
 }

@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, style::Color, text::Line, widgets::Paragraph, Frame};
+use ratatui::{layout::Rect, style::{Color, Style}, text::Line, widgets::Paragraph, Frame};
 
 use crate::terminal::clear_terminal_placements_in_area;
 
@@ -31,6 +31,16 @@ pub fn fill_area_spaces(frame: &mut Frame<'_>, area: Rect) {
     }
     let blank = " ".repeat(area.width as usize);
     let lines = std::iter::repeat_n(Line::from(blank), area.height as usize).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Paint every cell in `area` with spaces using `style` (opaque background fill).
+pub fn fill_area_bg(frame: &mut Frame<'_>, area: Rect, style: Style) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let row = Line::styled(" ".repeat(area.width as usize), style);
+    let lines = std::iter::repeat_n(row, area.height as usize).collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
 }
 
