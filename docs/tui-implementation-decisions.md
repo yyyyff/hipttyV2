@@ -69,7 +69,9 @@
 
 ### 4.3 残留 / 性能
 
-- 图片滚动残留：用户已参考其他项目修复，**保持现状**，不在此文档周期内改动。  
+- **WT 详情大图滚动溢出（2026-07-09）**: 帖子 Content 图在 WT 上走 Sixel + `SlicedImage`。当图同时被上裁（`skip>0`）与下裁（`drop>0`）时，上游 `ratatui-image` 11.0.6 的 `SlicedSixelData::bands` 按 `(height - drop)` 取 band，**未扣 skip**，Sixel 序列比 `image_area` 更高，像素溢出进 Status Bar，再滚形成残图。仅上裁或仅下裁、或图完整入屏时不复现。  
+  - **修复**: `[patch.crates-io]` → `vendor/ratatui-image`（基于 11.0.6），见 `vendor/ratatui-image/PATCHES.md`。  
+  - 与 §4.1 guard band、Kitty placement 清理是不同路径；勿用每帧 guard band 顶替。  
 - 详情页图片 prefetch：暂不优化。
 
 ---
@@ -203,3 +205,4 @@
 | 2026-07-09 | 取消终端 &lt; 80×24 硬拦截：小窗口继续渲染，仅 0 尺寸跳过绘制 |
 | 2026-07-09 | 详情正文：引用头去重（`@author in time`）；空白折叠；表情行内；underline/strike |
 | 2026-07-09 | 楼层头：去重 `发表于`；`本帖最后由…编辑` 并入 chrome（`编辑于` / `由X编辑于`） |
+| 2026-07-09 | §4.3：vendor patch `ratatui-image` 修复 Sixel skip+drop 溢出残图 |

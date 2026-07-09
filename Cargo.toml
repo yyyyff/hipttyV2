@@ -10,6 +10,8 @@ members = [
     "crates/hiptty-app",
     "crates/hiptty",
 ]
+# Patched path dep; not a workspace member (see [patch.crates-io]).
+exclude = ["vendor/ratatui-image"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,3 +46,8 @@ unicode-width = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 color-eyre = "0.6"
 rust-embed = "8"
+
+# Local fix for SlicedSixel skip+drop overshoot (ghost images into status bar on WT).
+# See vendor/ratatui-image/PATCHES.md — drop when upstream includes the fix.
+[patch.crates-io]
+ratatui-image = { path = "vendor/ratatui-image" }
