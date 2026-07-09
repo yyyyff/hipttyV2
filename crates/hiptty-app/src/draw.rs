@@ -1,19 +1,18 @@
 use hiptty_core::{forum_name, list_item_to_thread_summary};
 use hiptty_render::{clear_graphics_in_area, fill_area_spaces};
 use hiptty_widgets::{
-    draw_command_bar, draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list,
-    draw_forum_picker, draw_loading_indicator, draw_login, draw_main_menu,
-    draw_pm_thread, draw_search_prompt, draw_settings_panel, draw_simple_list, draw_startup,
-    draw_status_bar, draw_thread_list, draw_title_bar, draw_toast, draw_vertical_scrollbar,
-    list_content_lines, main_layout, title_bar_hits, ComposerProps, ConfirmProps, FloorListProps,
-    ForumPickerProps, ForumTabsProps, LoginFormProps, MainMenuProps,
-    PmThreadProps,
-    SearchPromptProps, SettingsProps, SimpleListProps, StartupProps, ThreadListProps,
-    TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
+    draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
+    draw_login, draw_main_menu, draw_pm_thread, draw_search_prompt, draw_settings_panel,
+    draw_simple_list, draw_startup, draw_status_bar, draw_thread_list, draw_title_bar, draw_toast,
+    draw_vertical_scrollbar, list_content_lines, main_layout, title_bar_hits, ComposerProps,
+    ConfirmProps, FloorListProps, ForumPickerProps, ForumTabsProps, LoginFormProps, MainMenuProps,
+    CommandLineProps, PmThreadProps, SearchPromptProps, SettingsProps, SimpleListProps, StartupProps,
+    StatusBarProps, ThreadListProps, TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT,
+    SIMPLE_ITEM_HEIGHT,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    widgets::{Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -78,24 +77,38 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         );
     }
 
-    if let Some(composer) = &app.composer {
+    let palette = app.palette();
+    let composer_bottom = if let Some(composer) = app.composer.as_mut() {
+        let type_unset = !composer.type_selected_ok() && composer.require_type();
+        let type_label = composer.type_label().to_string();
+        let show_type = composer.need_type_ui();
+        let h = hiptty_widgets::composer_height(area.height).min(area.height);
         draw_composer(
             frame,
             area,
             ComposerProps {
-                palette: app.palette(),
+                palette,
                 header: &composer.header,
                 subject: &composer.subject,
                 show_subject: composer.show_subject,
+                show_type,
+                type_label: &type_label,
+                type_unset,
                 focus: composer.focus,
                 textarea: &composer.textarea,
                 error: composer.error.as_deref(),
-                loading: composer.preparing || composer.submitting,
-                image_path: composer.image_path.as_deref(),
+                preparing: composer.preparing,
+                submitting: composer.submitting,
+                quote_preview: composer.quote_preview.as_deref(),
+                textarea_view_top: &mut composer.textarea_view_top,
             },
         );
-    }
+        h
+    } else {
+        0
+    };
 
+    // Toast last (above composer / modals in the cell buffer) and lifted when composer is open.
     if let Some(toast) = &app.toast {
         draw_toast(
             frame,
@@ -107,6 +120,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 tick: app.tick,
                 started_at: toast.started_at,
                 duration_ticks: toast.duration_ticks,
+                bottom_inset: composer_bottom,
             },
         );
     }
@@ -147,16 +161,40 @@ fn draw_overlays(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 forum_name: forum_name(app.feed.fid).unwrap_or("Forum"),
             },
         ),
-        Overlay::CommandBar => draw_command_bar(
-            frame,
-            area,
-            hiptty_widgets::CommandBarProps {
-                palette,
-                input: &app.overlay_state.command_input,
-            },
-        ),
-        Overlay::ForumPicker | Overlay::None => {}
+        // Command bar is rendered inline in the status bar (vim-style).
+        Overlay::CommandBar | Overlay::ForumPicker | Overlay::None => {}
     }
+}
+
+fn paint_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let hints = app.status_hints();
+    let command = app.status_command_input().map(|input| CommandLineProps {
+        input,
+        cursor: app.status_command_cursor().unwrap_or(input.len()),
+    });
+
+    // Command mode: reserve ~45% width for suggestions when possible.
+    let right_owned = if command.is_some() {
+        let suggest_budget = (area.width as usize * 45 / 100).clamp(16, 48);
+        Some(crate::commands::command_suggestion_strip(
+            app.overlay_state.command_input.as_str(),
+            suggest_budget,
+            app.page,
+        ))
+    } else {
+        app.status_right()
+    };
+
+    draw_status_bar(
+        frame,
+        area,
+        StatusBarProps {
+            palette: app.palette(),
+            hints: &hints,
+            right: right_owned.as_deref(),
+            command,
+        },
+    );
 }
 
 fn shell_title_bar(frame: &mut Frame<'_>, app: &mut App, title_area: Rect, right: Option<&str>) {
@@ -240,7 +278,7 @@ fn draw_startup_page(frame: &mut Frame<'_>, app: &App, area: Rect) {
         },
     );
     draw_dim_rule(frame, chunks[1], palette);
-    draw_status_bar(frame, chunks[2], palette, app.status_hints());
+    paint_status_bar(frame, app, chunks[2]);
 }
 
 fn draw_login_page(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -292,14 +330,11 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
 
-    if app.feed.loading {
-        draw_loading_indicator(frame, content, palette, app.tick);
-    }
     draw_list_error(frame, content, palette, app.feed.error.as_deref());
     repaint_title_chrome(frame, app, title_area, title_rule, None);
 
     draw_dim_rule(frame, status_rule, palette);
-    draw_status_bar(frame, status_area, palette, app.status_hints());
+    paint_status_bar(frame, app, status_area);
 
     if app.overlay == Overlay::ForumPicker {
         let frame_state = draw_forum_picker(
@@ -328,7 +363,6 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mask_cjk = app.dims_background();
     let chunks = main_layout(area);
     let counts = app.detail_title_counts();
-    let show_loading = app.detail.loading || app.detail.loading_more;
 
     shell_title_bar(frame, app, chunks[0], counts.as_deref());
     draw_dim_rule(frame, chunks[1], palette);
@@ -359,33 +393,27 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let detail_state = &app.detail;
         let images = app.image_cache.as_mut();
         if let Some(detail) = &detail_state.detail {
-            if !show_loading || detail_state.loading_more {
-                draw_floor_list(
-                    frame,
-                    content,
-                    FloorListProps {
-                        palette,
-                        posts: &detail.posts,
-                        selected: detail_state.selected,
-                        scroll_top: detail_state.scroll_top,
-                        show_avatar: true,
-                        images,
-                        mask_cjk,
-                    },
-                );
-            }
-        } else if detail_state.loading {
-            frame.render_widget(Clear, content);
+            // Keep existing floors visible while reloading; loading is shown in status bar.
+            draw_floor_list(
+                frame,
+                content,
+                FloorListProps {
+                    palette,
+                    posts: &detail.posts,
+                    selected: detail_state.selected,
+                    scroll_top: detail_state.scroll_top,
+                    show_avatar: true,
+                    images,
+                    mask_cjk,
+                },
+            );
         }
     }
 
-    if show_loading {
-        draw_loading_indicator(frame, content, palette, app.tick);
-    }
     draw_list_error(frame, content, palette, app.detail.error.as_deref());
     repaint_title_chrome(frame, app, chunks[0], chunks[1], counts.as_deref());
     draw_dim_rule(frame, chunks[3], palette);
-    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+    paint_status_bar(frame, app, chunks[4]);
 }
 
 fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
@@ -417,14 +445,11 @@ fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
             mask_cjk,
         },
     );
-    if app.list_page.loading {
-        draw_loading_indicator(frame, content, palette, app.tick);
-    }
     draw_list_error(frame, content, palette, app.list_page.error.as_deref());
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
-    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+    paint_status_bar(frame, app, chunks[4]);
 }
 
 fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show_avatar: bool) {
@@ -463,14 +488,11 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
             mask_cjk,
         },
     );
-    if app.list_page.loading {
-        draw_loading_indicator(frame, content, palette, app.tick);
-    }
     draw_list_error(frame, content, palette, app.list_page.error.as_deref());
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
-    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+    paint_status_bar(frame, app, chunks[4]);
 }
 
 fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -500,14 +522,11 @@ fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             mask_cjk,
         },
     );
-    if app.pm_thread.loading {
-        draw_loading_indicator(frame, content, palette, app.tick);
-    }
     draw_list_error(frame, content, palette, app.pm_thread.error.as_deref());
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
-    draw_status_bar(frame, chunks[4], palette, app.status_hints());
+    paint_status_bar(frame, app, chunks[4]);
 }
 
 fn draw_list_error(

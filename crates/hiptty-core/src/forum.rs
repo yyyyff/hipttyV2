@@ -119,7 +119,7 @@ pub fn forum_picker_fids(current_fid: u32, default_forums: &[u32; 3]) -> Vec<u32
     let mut excluded: std::collections::HashSet<u32> = default_forums.iter().copied().collect();
     excluded.extend(subforums.iter().copied());
 
-    let mut fids: Vec<u32> = subforums.iter().copied().collect();
+    let mut fids: Vec<u32> = subforums.to_vec();
     for forum in FORUMS {
         if !excluded.contains(&forum.id) {
             fids.push(forum.id);

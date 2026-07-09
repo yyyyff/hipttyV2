@@ -3,10 +3,11 @@ use hiptty_render::Palette;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
+use crate::ime::{cursor_after_text, set_ime_cursor};
 use crate::modal::{begin_modal, draw_label_value_row, draw_menu_item};
 
 pub const MAIN_MENU_ITEMS: &[&str] = &[
@@ -130,43 +131,6 @@ pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsPro
         .collect()
 }
 
-pub struct CommandBarProps<'a> {
-    pub palette: Palette,
-    pub input: &'a str,
-}
-
-pub fn draw_command_bar(frame: &mut Frame<'_>, area: Rect, props: CommandBarProps<'_>) {
-    let bar_h = 3.min(area.height);
-    crate::modal::draw_modal_backdrop(frame, area, props.palette);
-    let bar = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(bar_h),
-        width: area.width,
-        height: bar_h,
-    };
-    frame.render_widget(Clear, bar);
-
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(props.palette.accent_style())
-        .title(" 命令 ")
-        .style(props.palette.modal_surface_style());
-    let inner = block.inner(bar);
-    frame.render_widget(block, bar);
-
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
-    let input = format!(":{}█", props.input);
-    frame.render_widget(
-        Paragraph::new(input).style(props.palette.foreground_style()),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new(":exit :q :login :logout :pm :notif :search <词>")
-            .style(props.palette.muted_style()),
-        chunks[1],
-    );
-}
-
 pub struct SearchPromptProps<'a> {
     pub palette: Palette,
     pub input: &'a str,
@@ -192,10 +156,15 @@ pub fn draw_search_prompt(frame: &mut Frame<'_>, area: Rect, props: SearchPrompt
             .style(props.palette.secondary_style()),
         chunks[0],
     );
+    let prefix = "输入  ";
     let input_line = Line::from(vec![
-        Span::styled("输入  ", props.palette.muted_style()),
+        Span::styled(prefix, props.palette.muted_style()),
         Span::styled(props.input, props.palette.foreground_style()),
-        Span::styled("█", props.palette.accent_style()),
     ]);
     frame.render_widget(Paragraph::new(input_line), chunks[1]);
+    let prefix_cols = hiptty_render::str_width(prefix) as u16;
+    set_ime_cursor(
+        frame,
+        cursor_after_text(chunks[1], prefix_cols, props.input),
+    );
 }

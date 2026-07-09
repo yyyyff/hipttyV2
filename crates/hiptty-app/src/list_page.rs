@@ -22,16 +22,6 @@ impl ListPageKind {
         }
     }
 
-    pub fn status_hints(self) -> &'static str {
-        match self {
-            Self::PmList => "j/k ↑↓  Enter 打开  d 删除  b 返回  Esc 菜单",
-            Self::Notifications => "j/k ↑↓  Enter 跳转  b 返回  Esc 菜单",
-            Self::Search => "j/k ↑↓  Enter 打开  / 新搜索  b 返回  Esc 菜单",
-            Self::MyThreads | Self::MyReplies | Self::Favorites => {
-                "j/k ↑↓  Enter 打开  b 返回  Esc 菜单"
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]

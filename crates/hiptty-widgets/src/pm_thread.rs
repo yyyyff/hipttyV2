@@ -76,6 +76,7 @@ pub fn draw_pm_thread(frame: &mut Frame<'_>, area: Rect, props: PmThreadProps<'_
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_pm_message(
     frame: &mut Frame<'_>,
     area: Rect,

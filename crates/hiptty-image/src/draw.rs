@@ -14,6 +14,7 @@ pub const IMAGE_FAIL_LABEL: &str = "[图片加载失败]";
 ///
 /// `doc_x` / `doc_y` are absolute positions in the scrolled document; `scroll_top` is the
 /// viewport's scroll offset. `SlicedImage` receives the full viewport and clips naturally.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_graphic_in_viewport(
     frame: &mut Frame<'_>,
     viewport: Rect,

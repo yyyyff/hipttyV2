@@ -2,6 +2,7 @@ pub mod composer;
 pub mod floor_list;
 pub mod forum_picker;
 pub mod forum_tabs;
+pub mod ime;
 pub mod layout;
 pub mod login;
 pub mod logo;
@@ -30,12 +31,14 @@ pub use forum_picker::{
     draw_forum_picker, forum_picker_entries, ForumPickerFrame, ForumPickerHit, ForumPickerProps,
 };
 pub use forum_tabs::{draw_forum_tabs, forum_tab_hits, ForumTabHits, ForumTabsProps};
+pub use ime::{
+    cursor_after_text, next_scroll_top, set_ime_cursor, textarea_cursor_position,
+};
 pub use layout::{draw_dim_rule, main_layout};
 pub use login::{draw_login, draw_startup, LoginField, LoginFormProps, StartupProps};
 pub use overlays::{
-    draw_command_bar, draw_main_menu, draw_search_prompt, draw_settings_panel, CommandBarProps,
-    MainMenuProps, SearchPromptProps, SettingsProps,
-    MAIN_MENU_HINTS, MAIN_MENU_ITEMS,
+    draw_main_menu, draw_search_prompt, draw_settings_panel, MainMenuProps, SearchPromptProps,
+    SettingsProps, MAIN_MENU_HINTS, MAIN_MENU_ITEMS,
 };
 pub use toast::{
     draw_toast, ToastProps, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS, TOAST_TICK_MS,
@@ -50,7 +53,10 @@ pub use scroll::{
 pub use simple_list::{
     draw_simple_list, simple_list_capacity, SimpleListProps, SIMPLE_ITEM_HEIGHT,
 };
-pub use status_bar::draw_status_bar;
+pub use status_bar::{
+    draw_status_bar, fit_hints, loading_status_label, page_status_label, CommandLineProps, KeyHint,
+    StatusBarProps,
+};
 pub use thread_list::{
     draw_loading_indicator, draw_thread_list, ensure_thread_scroll,
     ensure_thread_scroll_lines as ensure_list_scroll_lines, thread_list_capacity, ThreadListProps,

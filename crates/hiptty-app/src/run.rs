@@ -73,7 +73,7 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
         if last_tick.elapsed() >= tick_rate {
             app.tick = app.tick.wrapping_add(1);
             last_tick = std::time::Instant::now();
-            if app.session.logged_in && app.tick % 60 == 0 {
+            if app.session.logged_in && app.tick.is_multiple_of(60) {
                 let _ = worker_tx.send(WorkerRequest::CheckUnread);
             }
         }
@@ -94,12 +94,25 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
+    // Kitty keyboard protocol: lets Ctrl+Enter report as Enter+CONTROL (best-effort).
+    let _ = crossterm::execute!(
+        io::stdout(),
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    );
     clear_terminal_graphics()?;
     let backend = CrosstermBackend::new(io::stdout());
     Terminal::new(backend)
 }
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::event::PopKeyboardEnhancementFlags
+    );
     crossterm::execute!(
         terminal.backend_mut(),
         crossterm::event::DisableMouseCapture,

@@ -252,12 +252,8 @@ fn handle_feed_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSend
             app.sync_feed_scroll();
             maybe_load_more(app, worker_tx);
         }
-        KeyCode::Char('r') => {
-            if let Some(thread) = app.feed.threads.get(app.feed.selected).cloned() {
-                open_feed_reply(app, &thread.tid);
-            }
-        }
-        KeyCode::Char('n') => open_new_thread(app),
+        KeyCode::Char('r') => refresh_feed(app, worker_tx),
+        KeyCode::Char('n') => open_new_thread(app, worker_tx),
         KeyCode::Enter => {
             let selected = app.feed.selected;
             if let Some(thread) = app.feed.threads.get(selected).cloned() {
@@ -402,9 +398,7 @@ fn handle_detail_key(
             }
         }
         KeyCode::Char('r') => open_detail_reply(app),
-        KeyCode::Char('q') => open_detail_quote(app, worker_tx),
-        KeyCode::Char('e') => open_detail_edit(app, worker_tx),
-        KeyCode::Char('d') => open_detail_delete_confirm(app),
+        // q / e / d deferred: need floor-scoped actions (own posts only / quote target).
         _ => {}
     }
 }
@@ -491,9 +485,23 @@ fn request_threads(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
         app.feed.scroll_lines = 0;
     }
     app.feed.loading = true;
+    app.feed.error = None;
     let _ = worker_tx.send(WorkerRequest::LoadThreads {
         fid: app.feed.fid,
         page,
+    });
+}
+
+/// Force-refresh feed page 1 without blanking the list (loading shows in status bar).
+pub fn refresh_feed(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.feed.loading {
+        return;
+    }
+    app.feed.loading = true;
+    app.feed.error = None;
+    let _ = worker_tx.send(WorkerRequest::LoadThreads {
+        fid: app.feed.fid,
+        page: 1,
     });
 }
 
@@ -571,7 +579,7 @@ pub fn handle_worker_response(
             if app.detail.tid != tid {
                 return;
             }
-            let mode = app.detail.pending_fetch.take().unwrap_or_else(|| {
+            let mode = app.detail.pending_fetch.take().unwrap_or({
                 if app.detail.loading_more {
                     DetailFetchMode::Append
                 } else {
@@ -635,6 +643,15 @@ pub fn handle_worker_response(
                 Ok(list) => {
                     if page == 1 {
                         app.feed.threads = list.threads;
+                        if !app.feed.threads.is_empty() {
+                            app.feed.selected = app
+                                .feed
+                                .selected
+                                .min(app.feed.threads.len().saturating_sub(1));
+                        } else {
+                            app.feed.selected = 0;
+                            app.feed.scroll_lines = 0;
+                        }
                     } else {
                         app.feed.threads.extend(list.threads);
                     }
@@ -676,7 +693,7 @@ pub fn handle_worker_response(
             };
             match result {
                 Ok(info) => {
-                    composer.apply_prepare(info.quote_text, info.subject, fallback);
+                    composer.apply_prepare(info, fallback);
                     composer.error = None;
                 }
                 Err(err) => {
@@ -740,23 +757,8 @@ pub fn handle_worker_response(
                 }
             }
         }
-        WorkerResponse::ComposerImageUploaded { path, result } => {
-            let Some(composer) = app.composer.as_mut() else {
-                return;
-            };
-            composer.submitting = false;
-            match result {
-                Ok(image_id) => {
-                    let tag = format!("[attachimg]{image_id}[/attachimg]");
-                    composer.textarea.insert_str(&tag);
-                    composer.image_path = None;
-                    composer.focus = ComposerFocus::Body;
-                    composer.error = None;
-                }
-                Err(err) => {
-                    composer.error = Some(format!("上传失败 ({path}): {}", error_message(&err)));
-                }
-            }
+        WorkerResponse::ComposerImageUploaded { .. } => {
+            // Image insert path removed from TUI; ignore late upload responses.
         }
         WorkerResponse::ImageFetched { url, kind, result } => {
             let outcome = match result {
@@ -866,13 +868,19 @@ fn handle_composer_key(
     key: KeyEvent,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
+    // Submit shortcuts. Terminals disagree on Ctrl+Enter encoding:
+    // - Enter + CONTROL (kitty/modern)
+    // - Char('\n') + CONTROL (LF)
+    // - Char('j') + CONTROL (Ctrl+J == LF historically)
+    // Ctrl+S kept as a reliable fallback.
+    if is_composer_submit_key(key) {
+        submit_composer(app, worker_tx);
+        return;
+    }
+
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl {
-        match key.code {
-            KeyCode::Char('s') | KeyCode::Char('S') => submit_composer(app, worker_tx),
-            KeyCode::Char('i') | KeyCode::Char('I') => start_image_path_input(app),
-            _ => {}
-        }
+        // Swallow other Ctrl combos so they don't type into the body.
         return;
     }
 
@@ -887,14 +895,25 @@ fn handle_composer_key(
         return;
     }
 
-    if composer.image_path.is_some() {
-        handle_image_path_key(app, key, worker_tx);
-        return;
-    }
-
     match key.code {
         KeyCode::Esc => app.composer = None,
-        KeyCode::Tab | KeyCode::BackTab => cycle_composer_focus(app, key.code == KeyCode::BackTab),
+        KeyCode::Tab | KeyCode::BackTab if composer.show_subject || composer.need_type_ui() => {
+            cycle_composer_focus(app, key.code == KeyCode::BackTab);
+        }
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Char('h')
+        | KeyCode::Char('l')
+        | KeyCode::Char('j')
+        | KeyCode::Char('k')
+            if composer.focus == ComposerFocus::Type =>
+        {
+            let delta = match key.code {
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('k') => -1,
+                _ => 1,
+            };
+            composer.cycle_type(delta);
+        }
         KeyCode::Backspace if composer.focus == ComposerFocus::Subject => {
             composer.subject.pop();
         }
@@ -908,69 +927,40 @@ fn handle_composer_key(
     }
 }
 
-fn handle_image_path_key(
-    app: &mut App,
-    key: KeyEvent,
-    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
-) {
-    let Some(composer) = app.composer.as_mut() else {
-        return;
-    };
-    match key.code {
-        KeyCode::Esc => {
-            composer.image_path = None;
-            composer.focus = ComposerFocus::Body;
-            composer.error = None;
-        }
-        KeyCode::Enter => {
-            let path = composer.image_path.clone().unwrap_or_default();
-            if path.trim().is_empty() {
-                composer.error = Some("请输入图片路径".into());
-                return;
-            }
-            composer.submitting = true;
-            composer.error = None;
-            let action = composer.action.clone();
-            let _ = worker_tx.send(WorkerRequest::UploadComposerImage { action, path });
-        }
-        KeyCode::Backspace => {
-            if let Some(path) = composer.image_path.as_mut() {
-                path.pop();
-            }
-        }
-        KeyCode::Char(c) => {
-            if let Some(path) = composer.image_path.as_mut() {
-                path.push(c);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn cycle_composer_focus(app: &mut App, reverse: bool) {
     let Some(composer) = app.composer.as_mut() else {
         return;
     };
-    if !composer.show_subject {
+    let order = composer.focus_order();
+    if order.len() <= 1 {
         composer.focus = ComposerFocus::Body;
         return;
     }
-    composer.focus = match (composer.focus, reverse) {
-        (ComposerFocus::Subject, false) => ComposerFocus::Body,
-        (ComposerFocus::Body, false) => ComposerFocus::Subject,
-        (ComposerFocus::Body, true) => ComposerFocus::Subject,
-        (ComposerFocus::Subject, true) => ComposerFocus::Body,
-        (ComposerFocus::ImagePath, _) => ComposerFocus::Body,
+    let cur = order.iter().position(|&f| f == composer.focus).unwrap_or(0);
+    let next = if reverse {
+        cur.checked_sub(1).unwrap_or(order.len() - 1)
+    } else {
+        (cur + 1) % order.len()
     };
+    composer.focus = order[next];
 }
 
-fn start_image_path_input(app: &mut App) {
-    let Some(composer) = app.composer.as_mut() else {
-        return;
-    };
-    composer.image_path = Some(String::new());
-    composer.focus = ComposerFocus::ImagePath;
-    composer.error = None;
+fn is_composer_submit_key(key: KeyEvent) -> bool {
+    let mods = key.modifiers;
+    // Ignore pure Shift; require Control (optionally with Shift/Alt as some TEs do).
+    if !mods.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(
+        key.code,
+        KeyCode::Enter
+            | KeyCode::Char('\n')
+            | KeyCode::Char('\r')
+            | KeyCode::Char('j')
+            | KeyCode::Char('J')
+            | KeyCode::Char('s')
+            | KeyCode::Char('S')
+    )
 }
 
 fn submit_composer(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -978,6 +968,11 @@ fn submit_composer(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
         return;
     };
     if composer.preparing || composer.submitting {
+        return;
+    }
+    if !composer.type_selected_ok() {
+        composer.error = Some("该版发帖必须指定分类".into());
+        composer.focus = ComposerFocus::Type;
         return;
     }
     let content = composer.body_text();
@@ -989,6 +984,7 @@ fn submit_composer(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
         composer.error = Some("标题不能为空".into());
         return;
     }
+    composer.sync_type_into_action();
     composer.submitting = true;
     composer.error = None;
     if composer.kind == ComposerKind::PmReply {
@@ -1042,28 +1038,21 @@ fn handle_confirm_delete_key(
     }
 }
 
-fn open_feed_reply(app: &mut App, tid: &str) {
-    let action = reply_thread_action(tid);
-    app.composer = Some(ComposerState::open(
-        ComposerKind::Reply,
-        action,
-        "回复".into(),
-        String::new(),
-        None,
-    ));
-}
-
-fn open_new_thread(app: &mut App) {
+fn open_new_thread(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let fid = app.feed.fid;
     let forum = hiptty_core::forum_name(fid).unwrap_or("Forum");
     let action = new_thread_action(fid);
-    app.composer = Some(ComposerState::open(
+    app.composer = Some(ComposerState::preparing(
         ComposerKind::NewThread,
-        action,
+        action.clone(),
         format!("新帖 · {forum}"),
-        String::new(),
-        Some(String::new()),
     ));
+    // Ensure subject field is available while preparing.
+    if let Some(composer) = app.composer.as_mut() {
+        composer.show_subject = true;
+        composer.subject.clear();
+    }
+    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
 }
 
 fn open_detail_reply(app: &mut App) {
@@ -1078,6 +1067,8 @@ fn open_detail_reply(app: &mut App) {
     ));
 }
 
+/// Floor-scoped quote/edit/delete — kept for a later contextual UI; not bound globally.
+#[allow(dead_code)]
 fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let Some(post) = app.selected_post().cloned() else {
         app.set_toast("请先选择要引用的楼层", true);
@@ -1093,6 +1084,7 @@ fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequ
     let _ = worker_tx.send(WorkerRequest::PreparePost { action });
 }
 
+#[allow(dead_code)]
 fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
     let Some(post) = app.selected_post().cloned() else {
         app.set_toast("请先选择要编辑的楼层", true);
@@ -1113,6 +1105,7 @@ fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReque
     let _ = worker_tx.send(WorkerRequest::PreparePost { action });
 }
 
+#[allow(dead_code)]
 fn open_detail_delete_confirm(app: &mut App) {
     let Some(post) = app.selected_post().cloned() else {
         app.set_toast("请先选择要删除的楼层", true);

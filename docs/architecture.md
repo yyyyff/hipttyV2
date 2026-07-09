@@ -104,8 +104,8 @@ TUI 渲染辅助，不依赖 adapter。
 | `thread_list`, `simple_list` | Feed / PM / 通知等列表 |
 | `floor_list` | 详情页楼层（可变高度 + 图片块） |
 | `scroll` | 垂直滚动条（基于 `tui-scrollbar`） |
-| `title_bar`, `status_bar` | 顶栏 / 底栏 |
-| `overlays` | 菜单、帮助、设置、命令栏 |
+| `title_bar`, `status_bar` | 顶栏 / 底栏（左快捷键分档 + 右状态；`:` 命令行内联于 status bar） |
+| `overlays` | 菜单、设置、搜索提示（命令栏已并入 status bar） |
 | `composer`, `login`, `forum_picker` | 发帖编辑器、登录、版块选择 |
 | `poll_block`, `pm_thread`, `logo` | 投票块、私信对话、Logo |
 

@@ -79,6 +79,7 @@ pub fn draw_simple_list(frame: &mut Frame<'_>, area: Rect, mut props: SimpleList
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_simple_item(
     frame: &mut Frame<'_>,
     area: Rect,

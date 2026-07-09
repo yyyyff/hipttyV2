@@ -102,6 +102,7 @@ pub fn draw_thread_list(frame: &mut Frame<'_>, area: Rect, mut props: ThreadList
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_thread_item(
     frame: &mut Frame<'_>,
     area: Rect,

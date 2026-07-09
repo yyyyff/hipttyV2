@@ -21,6 +21,8 @@ pub struct ToastProps<'a> {
     pub tick: u64,
     pub started_at: u64,
     pub duration_ticks: u64,
+    /// Rows reserved at the bottom (e.g. open composer) so toast sits above them.
+    pub bottom_inset: u16,
 }
 
 pub fn draw_toast(frame: &mut Frame<'_>, area: Rect, props: ToastProps<'_>) {
@@ -47,12 +49,15 @@ pub fn draw_toast(frame: &mut Frame<'_>, area: Rect, props: ToastProps<'_>) {
     let toast_width = inner_w.saturating_add(2).min(area.width as usize) as u16;
     let height = content_lines + 2;
 
+    // Keep toast above bottom chrome (status bar ~1 + optional composer).
+    let bottom_pad = props.bottom_inset.saturating_add(1).max(1);
     let x = area
         .x
         .saturating_add(area.width.saturating_sub(toast_width + 2));
-    let y = area
-        .y
-        .saturating_add(area.height.saturating_sub(height + 1));
+    let y = area.y.saturating_add(
+        area.height
+            .saturating_sub(height.saturating_add(bottom_pad)),
+    );
     let toast_area = Rect {
         x,
         y,

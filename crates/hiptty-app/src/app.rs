@@ -6,8 +6,9 @@ use hiptty_image::{AvatarDiskCache, FetchRequest, ImageCache};
 use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
     clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets, forum_picker_entries,
-    snap_scroll_to_item, thread_list_capacity, LoginField, ScrollBarInteraction, ScrollChrome,
-    TitleBarHits, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS, SCROLLBAR_COLS,
+    loading_status_label, page_status_label, snap_scroll_to_item, thread_list_capacity, KeyHint,
+    LoginField, ScrollBarInteraction, ScrollChrome, TitleBarHits, TOAST_ERROR_TICKS,
+    TOAST_SUCCESS_TICKS, SCROLLBAR_COLS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -79,7 +80,10 @@ pub enum Overlay {
 pub struct OverlayState {
     pub main_menu_selected: usize,
     pub settings_selected: usize,
+    /// Command-mode buffer (without the leading `:`).
     pub command_input: String,
+    /// Byte offset of the caret inside [`command_input`].
+    pub command_cursor: usize,
     pub search_input: String,
 }
 
@@ -317,7 +321,11 @@ impl App {
     }
 
     pub fn dims_background(&self) -> bool {
-        self.overlay != Overlay::None || self.confirm_delete.is_some()
+        if self.confirm_delete.is_some() {
+            return true;
+        }
+        // Command bar replaces the status line only — keep content undimmed (vim-style).
+        !matches!(self.overlay, Overlay::None | Overlay::CommandBar)
     }
 
     pub fn content_palette(&self) -> Palette {
@@ -377,36 +385,207 @@ impl App {
         self.toast = None;
     }
 
-    pub fn status_hints(&self) -> &'static str {
+    /// Left-cluster shortcuts for the status bar (priority 0 = keep first when narrow).
+    pub fn status_hints(&self) -> Vec<KeyHint> {
         if self.confirm_delete.is_some() {
-            return "y 确认  n/Esc 取消";
+            return vec![
+                KeyHint::new("y", "确认", 0),
+                KeyHint::new("n/Esc", "取消", 0),
+            ];
         }
-        if self.composer.is_some() {
-            return "Ctrl+S 发送  Esc 取消  Ctrl+I 插图";
+        if let Some(composer) = &self.composer {
+            if composer.submitting || composer.preparing {
+                return vec![KeyHint::new("Esc", "取消", 0)];
+            }
+            let mut hints = vec![
+                KeyHint::new("C-Enter/S", "发送", 0),
+                KeyHint::new("Esc", "取消", 0),
+            ];
+            if composer.need_type_ui() || composer.show_subject {
+                hints.push(KeyHint::new("Tab", "切换", 1));
+            }
+            if composer.need_type_ui() {
+                hints.push(KeyHint::new("←→", "分类", 1));
+            }
+            return hints;
         }
         match self.overlay {
-            Overlay::ForumPicker => "j/k  Enter  Esc",
-            Overlay::MainMenu => "",
-            Overlay::Settings => "j/k  Enter  Esc",
-            Overlay::SearchPrompt => "Enter 搜索  Esc 取消",
-            Overlay::CommandBar => "Enter 执行  Esc 取消",
+            Overlay::ForumPicker => vec![
+                KeyHint::new("j/k", "选择", 0),
+                KeyHint::new("Enter", "确认", 0),
+                KeyHint::new("Esc", "关闭", 0),
+            ],
+            Overlay::MainMenu => vec![
+                KeyHint::new("j/k", "移动", 0),
+                KeyHint::new("Enter", "确认", 0),
+                KeyHint::new("Esc", "关闭", 0),
+            ],
+            Overlay::Settings => vec![
+                KeyHint::new("j/k", "移动", 0),
+                KeyHint::new("Enter", "修改", 0),
+                KeyHint::new("Esc", "关闭", 0),
+            ],
+            Overlay::SearchPrompt => vec![
+                KeyHint::new("Enter", "搜索", 0),
+                KeyHint::new("Esc", "取消", 0),
+            ],
+            Overlay::CommandBar => vec![
+                KeyHint::new("Enter", "执行", 0),
+                KeyHint::new("Esc", "取消", 0),
+            ],
             Overlay::None => match self.page {
-                Page::Startup => "Esc 退出",
-                Page::Login => "Tab/↑↓ 切换 · Enter 确认 · Esc 退出",
-                Page::ThreadFeed => {
-                    "j/k ↑↓  Enter 打开  [ ] 版块  f 更多  r 回复  n 新帖  / 搜索  Esc 菜单  : 命令"
-                }
-                Page::ThreadDetail => {
-                    "j/k ↑↓  PgUp/Dn  r 回复  q 引用  e 编辑  d 删除  g/G 首页/末页  b 返回"
-                }
-                Page::PmList => "j/k  Enter 打开  d 删除  b 返回  Esc 菜单",
-                Page::PmThread => "r 回复  d 删除对话  j/k 滚动  b 返回",
-                Page::Notifications => "j/k  Enter 跳转  b 返回  Esc 菜单",
-                Page::Search => "j/k  Enter 打开  / 新搜索  b 返回  Esc 菜单",
-                Page::MyThreads | Page::MyReplies | Page::Favorites => {
-                    "j/k  Enter 打开  b 返回  Esc 菜单"
-                }
+                Page::Startup => vec![KeyHint::new("Esc", "退出", 0)],
+                Page::Login => vec![
+                    KeyHint::new("Tab/↑↓", "切换", 0),
+                    KeyHint::new("Enter", "确认", 0),
+                    KeyHint::new("Esc", "退出", 1),
+                ],
+                Page::ThreadFeed => vec![
+                    KeyHint::new("j/k", "导航", 0),
+                    KeyHint::new("Enter", "打开", 0),
+                    KeyHint::new("r", "刷新", 1),
+                    KeyHint::new("n", "新帖", 1),
+                    KeyHint::new("/", "搜索", 1),
+                    KeyHint::new("[]", "版块", 2),
+                    KeyHint::new("f", "更多", 2),
+                    KeyHint::new("Esc", "菜单", 1),
+                    KeyHint::new(":", "命令", 2),
+                ],
+                Page::ThreadDetail => vec![
+                    KeyHint::new("j/k", "滚动", 0),
+                    KeyHint::new("r", "回复", 0),
+                    KeyHint::new("b", "返回", 0),
+                    KeyHint::new("PgUp/Dn", "翻页", 1),
+                    KeyHint::new("g/G", "首/末", 2),
+                ],
+                Page::PmList => vec![
+                    KeyHint::new("j/k", "导航", 0),
+                    KeyHint::new("Enter", "打开", 0),
+                    KeyHint::new("r", "刷新", 1),
+                    KeyHint::new("d", "删除", 1),
+                    KeyHint::new("b", "返回", 0),
+                    KeyHint::new("Esc", "菜单", 1),
+                ],
+                Page::PmThread => vec![
+                    KeyHint::new("j/k", "滚动", 0),
+                    KeyHint::new("r", "回复", 0),
+                    KeyHint::new("d", "删除", 1),
+                    KeyHint::new("b", "返回", 0),
+                ],
+                Page::Notifications => vec![
+                    KeyHint::new("j/k", "导航", 0),
+                    KeyHint::new("Enter", "跳转", 0),
+                    KeyHint::new("r", "刷新", 1),
+                    KeyHint::new("b", "返回", 0),
+                    KeyHint::new("Esc", "菜单", 1),
+                ],
+                Page::Search => vec![
+                    KeyHint::new("j/k", "导航", 0),
+                    KeyHint::new("Enter", "打开", 0),
+                    KeyHint::new("r", "刷新", 1),
+                    KeyHint::new("/", "新搜索", 1),
+                    KeyHint::new("b", "返回", 0),
+                    KeyHint::new("Esc", "菜单", 1),
+                ],
+                Page::MyThreads | Page::MyReplies | Page::Favorites => vec![
+                    KeyHint::new("j/k", "导航", 0),
+                    KeyHint::new("Enter", "打开", 0),
+                    KeyHint::new("r", "刷新", 1),
+                    KeyHint::new("b", "返回", 0),
+                    KeyHint::new("Esc", "菜单", 1),
+                ],
             },
+        }
+    }
+
+    /// Right-side status: loading animation and/or page indicator.
+    pub fn status_right(&self) -> Option<String> {
+        if self.confirm_delete.is_some() {
+            return None;
+        }
+        if let Some(composer) = &self.composer {
+            // post() includes resolve_inline_images (compress/upload) then submit.
+            if composer.submitting {
+                return Some(format!("发送中{}", loading_dots(self.tick)));
+            }
+            if composer.preparing {
+                return Some(format!("准备中{}", loading_dots(self.tick)));
+            }
+            return None;
+        }
+        if self.overlay == Overlay::CommandBar {
+            // Suggestions are width-aware and built in `paint_status_bar`.
+            return None;
+        }
+        if matches!(
+            self.overlay,
+            Overlay::MainMenu | Overlay::Settings | Overlay::SearchPrompt | Overlay::ForumPicker
+        ) {
+            return None;
+        }
+
+        let loading = self.page_is_loading();
+        let page = self.page_status();
+
+        match (loading, page) {
+            (true, Some(p)) => Some(format!("{} · {p}", loading_status_label(self.tick))),
+            (true, None) => Some(loading_status_label(self.tick)),
+            (false, Some(p)) => Some(p),
+            (false, None) => None,
+        }
+    }
+
+    fn page_is_loading(&self) -> bool {
+        match self.page {
+            Page::ThreadFeed => self.feed.loading,
+            Page::ThreadDetail => self.detail.loading || self.detail.loading_more,
+            Page::PmThread => self.pm_thread.loading,
+            Page::PmList
+            | Page::Notifications
+            | Page::Search
+            | Page::MyThreads
+            | Page::MyReplies
+            | Page::Favorites => self.list_page.loading,
+            Page::Startup | Page::Login => self.login.loading,
+        }
+    }
+
+    fn page_status(&self) -> Option<String> {
+        match self.page {
+            Page::ThreadFeed => page_status_label(self.feed.page, self.feed.max_page),
+            Page::ThreadDetail => self
+                .detail
+                .detail
+                .as_ref()
+                .and_then(|d| page_status_label(d.page, d.last_page)),
+            Page::PmList
+            | Page::Notifications
+            | Page::Search
+            | Page::MyThreads
+            | Page::MyReplies
+            | Page::Favorites => page_status_label(self.list_page.page, self.list_page.max_page),
+            _ => None,
+        }
+    }
+
+    /// When command bar is open, return the current input for inline status rendering.
+    pub fn status_command_input(&self) -> Option<&str> {
+        if self.overlay == Overlay::CommandBar {
+            Some(self.overlay_state.command_input.as_str())
+        } else {
+            None
+        }
+    }
+
+    pub fn status_command_cursor(&self) -> Option<usize> {
+        if self.overlay == Overlay::CommandBar {
+            Some(
+                self.overlay_state
+                    .command_cursor
+                    .min(self.overlay_state.command_input.len()),
+            )
+        } else {
+            None
         }
     }
 
@@ -589,5 +768,14 @@ impl App {
             .iter()
             .position(|(id, _)| *id == creds.security_question)
             .unwrap_or(0);
+    }
+}
+
+fn loading_dots(tick: u64) -> &'static str {
+    match (tick / 3) % 4 {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
     }
 }

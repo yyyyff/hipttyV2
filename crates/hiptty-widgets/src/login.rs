@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::ime::{cursor_after_text, set_ime_cursor};
 use crate::logo::draw_login_logo;
 
 const FORM_WIDTH: u16 = 44;
@@ -236,7 +237,10 @@ fn draw_text_input(
             .alignment(Alignment::Right),
         label_area,
     );
-    frame.render_widget(Paragraph::new(display).style(value_style), input_area);
+    frame.render_widget(
+        Paragraph::new(display.as_str()).style(value_style),
+        input_area,
+    );
     frame.render_widget(
         Paragraph::new("─".repeat(ul_w as usize)).style(underline_style),
         Rect {
@@ -246,6 +250,10 @@ fn draw_text_input(
             height: 1,
         },
     );
+
+    if row.focused && !row.disabled {
+        set_ime_cursor(frame, cursor_after_text(input_area, 0, &display));
+    }
 }
 
 fn draw_security_picker(

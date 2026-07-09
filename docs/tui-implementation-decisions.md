@@ -104,7 +104,7 @@
 
 ### 5.3 动画（仅状态反馈）
 
-**做**：加载/处理中指示（已有 `draw_loading_indicator` 点阵循环，可扩展到列表首屏、发帖提交、登录等）。
+**做**：加载/处理中指示——列表/详情主反馈在 Status Bar 右侧（`加载中…`）；composer/confirm 等仍用自身 loading 态。
 
 **不做**：窗口/页面切换 slide、弹层 fade-scale、编辑器/Toast 位移动画。
 
@@ -126,11 +126,21 @@
 
 因此「清本地 session」在 plan 里指删 `session.json` + 清 cookie；**现实现只清了 credentials，session 文件与内存 cookie 仍在**。多 profile 下其它 profile 文件不受影响。按当前共识可维持现状，完整登出列入 §5.2。
 
-### 5.5 发帖插图 Ctrl+I — 当前行为
+### 5.5 发帖插图 — 当前行为
 
-- Status Bar / 帮助仍写「Ctrl+I 插图」。
-- 按下后进入 **手输本地路径** 模式（`ComposerFocus::ImagePath`），Enter 走 `UploadComposerImage` 上传并插入 `[attachimg]id[/attachimg]`。
-- **无系统文件选择器**；路径方案待废弃，插图交互需单独 redesign（§5.2）。
+- **主路径**：正文写本地图片路径；`post()` 内 `resolve_inline_images` 负责压缩/上传并替换为 `[attachimg]`（远程 URL 包 `[img]`）。无 Ctrl+I、无发送前本地预检、无 composer 插图说明文案。
+- 发送中 status bar 右侧显示「发送中…」（含图片处理）；composer 标题同步「发送中…」。
+- Worker `UploadComposerImage` 仍保留供 CLI/调试；TUI 不走该路径。
+
+### 5.5b Status Bar（2026-07-09）
+
+- **布局**：左 `KeyHint` 快捷键（accent 键 + secondary 说明，窄屏按 priority 丢次要键）+ 右状态（`加载中…` / `页码 page/max`）。
+- **Loading**：内容区底部 `draw_loading_indicator` 不再作为主反馈；loading 走 status 右侧（列表/详情保留旧内容直至响应）。
+- **Command bar**：`:` 内联替换 status 行（vim cmdline）：左 `:` + 可移动光标输入，右为前缀过滤的命令建议；Tab 补全；Ctrl+U 清空；空 Enter 取消。不再单独 overlay；内容不 dim。
+- **命令目录**（`commands::COMMANDS`）：`q` `pm` `notif` `search` `my` `replies` `fav` `refresh` `login` `logout` `exit`（及别名）。
+- **详情页回复命令**：`r` → 主题回帖（`ReplyThread`）；`r#N` → 回复 N 楼（`ReplyPost`）；`rr#N` → 引用 N 楼（`QuotePost`）；楼层命令仅在已加载楼层上生效并选中该楼。
+- **详情页建议条**：隐藏 nav / 账号命令（`pm` `notif` `search` `my` `replies` `fav` `login` `logout`）；保留 `r` / `r#N` / `rr#N` / `q` / `refresh` / `exit`。
+- **快捷键调整**：Feed / 列表 `r` = 强制刷新（不再回复）；详情去掉全局 `q`/`e`/`d`（楼层上下文动作延后）。
 
 ### 5.6 黑名单 — 当前行为（空壳）
 
@@ -184,3 +194,9 @@
 | 2026-07-03 | 鼠标：滚轮平滑滚动 + tui-scrollbar 拖拽条 + Title Bar 图标点击 |
 | 2026-07-07 | 文档整理：`tui-design.md` 与生态调研移至 `archive/`；新增 `AGENTS.md`、`architecture.md`、根目录 `README.md` |
 | 2026-07-07 | 协作口径调整：代码/文档/口头说明均可能过时；冲突或方向跑偏时停下等人决定；Backlog 为备忘 |
+| 2026-07-09 | §5.5b Status Bar：左 hint 分档 + 右 loading/页码；`:` 内联；Feed `r` 刷新；详情去 qed |
+| 2026-07-09 | 命令模式：目录/Tab 补全/建议条/光标编辑；移除独立 CommandBar overlay |
+| 2026-07-09 | 详情命令：`r#N` 回复楼、`rr#N` 引用楼 |
+| 2026-07-09 | IME：输入态 `frame.set_cursor_position`，光标跟随登录/命令栏/搜索/composer |
+| 2026-07-09 | Composer：Ctrl+Enter 发送；去插图；引用块只读；Tab 仅新帖/编辑 |
+| 2026-07-09 | 新帖分类：PrePost `#typeid` 驱动 UI；B&S/占位 0 强制选择；←→ 切换 |

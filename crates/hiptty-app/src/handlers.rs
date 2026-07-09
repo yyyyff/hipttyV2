@@ -4,7 +4,7 @@ use hiptty_widgets::MAIN_MENU_ITEMS;
 use tokio::sync::mpsc;
 
 use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
-use crate::commands::execute_command;
+use crate::commands::{execute_command, tab_complete_command};
 use crate::composer::{ComposerKind, ComposerState};
 use crate::list_page::ListPageKind;
 use crate::nav::{navigate_back, navigate_to};
@@ -27,14 +27,12 @@ pub fn handle_global_key(
     match key.code {
         KeyCode::Char(':') => {
             app.overlay_state.command_input.clear();
+            app.overlay_state.command_cursor = 0;
             app.overlay = Overlay::CommandBar;
             true
         }
         KeyCode::Esc => {
-            if app.page == Page::ThreadFeed {
-                app.overlay_state.main_menu_selected = 0;
-                app.overlay = Overlay::MainMenu;
-            } else if !navigate_back(app) {
+            if app.page == Page::ThreadFeed || !navigate_back(app) {
                 app.overlay_state.main_menu_selected = 0;
                 app.overlay = Overlay::MainMenu;
             }
@@ -204,18 +202,98 @@ fn handle_command_bar_key(
     key: KeyEvent,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
+    // Ctrl+U clears the line (readline / vim cmdline habit).
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
+    {
+        app.overlay_state.command_input.clear();
+        app.overlay_state.command_cursor = 0;
+        return;
+    }
+
     match key.code {
-        KeyCode::Esc => app.overlay = Overlay::None,
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.overlay_state.command_input.clear();
+            app.overlay_state.command_cursor = 0;
+        }
         KeyCode::Enter => {
             let input = app.overlay_state.command_input.clone();
             execute_command(app, &input, worker_tx);
         }
-        KeyCode::Backspace => {
-            app.overlay_state.command_input.pop();
+        KeyCode::Tab => {
+            let page = app.page;
+            let input = &mut app.overlay_state.command_input;
+            let cursor = &mut app.overlay_state.command_cursor;
+            tab_complete_command(input, cursor, page);
         }
-        KeyCode::Char(c) => app.overlay_state.command_input.push(c),
+        KeyCode::Backspace => command_backspace(app),
+        KeyCode::Delete => command_delete(app),
+        KeyCode::Left => {
+            let cur = app.overlay_state.command_cursor;
+            app.overlay_state.command_cursor = prev_char_boundary(&app.overlay_state.command_input, cur);
+        }
+        KeyCode::Right => {
+            let cur = app.overlay_state.command_cursor;
+            app.overlay_state.command_cursor = next_char_boundary(&app.overlay_state.command_input, cur);
+        }
+        KeyCode::Home => app.overlay_state.command_cursor = 0,
+        KeyCode::End => app.overlay_state.command_cursor = app.overlay_state.command_input.len(),
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            command_insert(app, c);
+        }
         _ => {}
     }
+}
+
+fn command_insert(app: &mut App, c: char) {
+    let cur = app
+        .overlay_state
+        .command_cursor
+        .min(app.overlay_state.command_input.len());
+    app.overlay_state.command_input.insert(cur, c);
+    app.overlay_state.command_cursor = cur + c.len_utf8();
+}
+
+fn command_backspace(app: &mut App) {
+    let cur = app.overlay_state.command_cursor;
+    if cur == 0 {
+        return;
+    }
+    let prev = prev_char_boundary(&app.overlay_state.command_input, cur);
+    app.overlay_state.command_input.drain(prev..cur);
+    app.overlay_state.command_cursor = prev;
+}
+
+fn command_delete(app: &mut App) {
+    let cur = app.overlay_state.command_cursor;
+    if cur >= app.overlay_state.command_input.len() {
+        return;
+    }
+    let next = next_char_boundary(&app.overlay_state.command_input, cur);
+    app.overlay_state.command_input.drain(cur..next);
+}
+
+fn prev_char_boundary(s: &str, idx: usize) -> usize {
+    if idx == 0 {
+        return 0;
+    }
+    let mut i = idx.min(s.len()) - 1;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 pub fn handle_list_page_key(
@@ -239,6 +317,7 @@ pub fn handle_list_page_key(
             }
         }
         KeyCode::Enter => open_list_selection(app, worker_tx),
+        KeyCode::Char('r') => refresh_list_page(app, worker_tx, kind),
         KeyCode::Char('d') if kind == ListPageKind::PmList => {
             if let Some(item) = app.list_page.items.get(app.list_page.selected).cloned() {
                 if let Some(uid) = item.uid {
@@ -282,7 +361,9 @@ pub fn handle_pm_thread_key(
                 String::new(),
                 None,
             ));
-            app.composer.as_mut().map(|c| c.pm_uid = Some(uid));
+            if let Some(c) = app.composer.as_mut() {
+                c.pm_uid = Some(uid);
+            }
         }
         KeyCode::Char('d') => {
             let uid = app.pm_thread.peer_uid.clone();
@@ -312,6 +393,28 @@ pub fn request_list_page(
         fid: app.feed.fid,
         query: app.list_page.search_query.clone(),
         search_id: app.list_page.search_id.clone(),
+    });
+}
+
+/// Force-refresh current list page 1 without blanking existing rows.
+pub fn refresh_list_page(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    kind: ListPageKind,
+) {
+    if app.list_page.loading {
+        return;
+    }
+    app.list_page.kind = Some(kind);
+    app.list_page.loading = true;
+    app.list_page.error = None;
+    // Page-1 replace; keep selection until response arrives.
+    let _ = worker_tx.send(WorkerRequest::LoadSimpleList {
+        kind,
+        page: 1,
+        fid: app.feed.fid,
+        query: app.list_page.search_query.clone(),
+        search_id: None,
     });
 }
 
@@ -464,6 +567,15 @@ pub fn handle_list_response(
         Ok(list) => {
             if list.page <= 1 {
                 app.list_page.items = list.items;
+                if !app.list_page.items.is_empty() {
+                    app.list_page.selected = app
+                        .list_page
+                        .selected
+                        .min(app.list_page.items.len().saturating_sub(1));
+                } else {
+                    app.list_page.selected = 0;
+                    app.list_page.scroll_lines = 0;
+                }
             } else {
                 app.list_page.items.extend(list.items);
             }
@@ -511,7 +623,7 @@ pub fn handle_worker_extensions(
                     app.sync_pm_scroll();
                 }
                 Err(err) => {
-                    if is_auth_required(&err) {
+                    if is_auth_required(err) {
                         crate::event::try_auto_relogin(app, worker_tx);
                     } else {
                         app.pm_thread.error = Some(err.to_string());
@@ -586,7 +698,7 @@ pub fn handle_worker_extensions(
                     app.sync_detail_scroll();
                 }
                 Err(err) => {
-                    if is_auth_required(&err) {
+                    if is_auth_required(err) {
                         crate::event::try_auto_relogin(app, worker_tx);
                     } else {
                         app.detail.error = Some(err.to_string());
