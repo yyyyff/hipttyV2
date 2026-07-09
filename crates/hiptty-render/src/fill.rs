@@ -1,22 +1,52 @@
-use ratatui::{layout::Rect, style::{Color, Style}, text::Line, widgets::Paragraph, Frame};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+    text::Line,
+    widgets::Paragraph,
+    Frame,
+};
 
 use crate::terminal::clear_terminal_placements_in_area;
+
+/// When true, the next `clear_*` helpers emit Kitty `d=y` placement deletes (WT only).
+///
+/// Content images on WT use Sixel (cell-bound); these deletes mainly clean Kitty
+/// avatars/smileys after scroll or layout shifts. Re-sending every idle frame is pure cost.
+static CLEAR_KITTY_PLACEMENTS: AtomicBool = AtomicBool::new(true);
+
+/// Begin a draw frame: whether Kitty placements in cleared areas should be deleted.
+///
+/// Call once at the start of `draw`. Prefer `true` after scroll, resize, page change,
+/// or image decode; `false` on idle re-paints (tick/cursor) when graphics did not move.
+pub fn begin_frame_graphics(clear_kitty_placements: bool) {
+    CLEAR_KITTY_PLACEMENTS.store(clear_kitty_placements, Ordering::Relaxed);
+}
+
+fn should_clear_kitty_placements() -> bool {
+    CLEAR_KITTY_PLACEMENTS.load(Ordering::Relaxed)
+}
 
 /// Delete Kitty placements and reset cells in `area` (text buffer unchanged).
 pub fn clear_graphics_in_area(frame: &mut Frame<'_>, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let _ = clear_terminal_placements_in_area(area);
+    if should_clear_kitty_placements() {
+        let _ = clear_terminal_placements_in_area(area);
+    }
     clear_rect(frame, area);
 }
 
-/// Clear text buffer and Kitty placements in `area` before drawing scrollable content.
+/// Clear text buffer (and optionally Kitty placements) in `area` before scrollable content.
 pub fn clear_content_viewport(frame: &mut Frame<'_>, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let _ = clear_terminal_placements_in_area(area);
+    if should_clear_kitty_placements() {
+        let _ = clear_terminal_placements_in_area(area);
+    }
     clear_rect(frame, area);
     fill_area_spaces(frame, area);
 }
@@ -46,9 +76,10 @@ pub fn fill_area_bg(frame: &mut Frame<'_>, area: Rect, style: Style) {
 
 /// Wipe the bottom `rows` of a content pane: delete Kitty placements, reset cells, fill spaces.
 ///
-/// **Deprecated — do not use in the draw loop.** This was an early Windows Terminal Kitty
-/// workaround that fought with placement-based scroll clearing and caused image ghosting.
-/// Sixel last-row scroll is handled separately via `hiptty_image::graphics_bottom_margin`.
+/// **Deprecated — do not use in the draw loop.** Early Windows Terminal Kitty workaround that
+/// fought with placement-based scroll clearing and caused image ghosting. Sixel last-row scroll
+/// is handled via `hiptty_image::graphics_bottom_margin`. Content residual on scroll was largely
+/// a SlicedSixel skip+drop bug (vendor patch), not missing guard-band wipes.
 pub fn erase_graphics_guard_band(frame: &mut Frame<'_>, content_area: Rect, rows: u16) {
     let rows = rows.min(content_area.height);
     if rows == 0 {
@@ -62,6 +93,7 @@ pub fn erase_graphics_guard_band(frame: &mut Frame<'_>, content_area: Rect, rows
         width: content_area.width,
         height: rows,
     };
+    // Force placement clear even if the frame flag is off — this path is emergency-only.
     let _ = clear_terminal_placements_in_area(band);
     clear_rect(frame, band);
     fill_area_spaces(frame, band);
@@ -83,5 +115,20 @@ pub fn clear_rect(frame: &mut Frame<'_>, area: Rect) {
                 cell.set_bg(Color::Reset);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_flag_defaults_to_clearing() {
+        begin_frame_graphics(true);
+        assert!(should_clear_kitty_placements());
+        begin_frame_graphics(false);
+        assert!(!should_clear_kitty_placements());
+        // Restore safer default for other tests in the process.
+        begin_frame_graphics(true);
     }
 }

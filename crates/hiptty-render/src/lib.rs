@@ -10,8 +10,8 @@ pub use content::{
     render_content_node, render_post_content_lines, signature_line,
 };
 pub use fill::{
-    clear_content_viewport, clear_graphics_in_area, clear_rect, erase_graphics_guard_band,
-    fill_area_bg, fill_area_spaces,
+    begin_frame_graphics, clear_content_viewport, clear_graphics_in_area, clear_rect,
+    erase_graphics_guard_band, fill_area_bg, fill_area_spaces,
 };
 pub use terminal::{
     clear_terminal_graphics, clear_terminal_placements, clear_terminal_placements_in_area,

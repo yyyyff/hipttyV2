@@ -1,5 +1,5 @@
 use hiptty_core::{forum_name, list_item_to_thread_summary};
-use hiptty_render::{clear_graphics_in_area, fill_area_spaces};
+use hiptty_render::{begin_frame_graphics, clear_graphics_in_area, fill_area_spaces};
 use hiptty_widgets::{
     draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
     draw_login, draw_main_menu, draw_pm_thread, draw_search_prompt, draw_settings_panel,
@@ -32,6 +32,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         if let Some(anchor) = scroll_anchor {
             app.restore_detail_scroll_anchor(anchor);
         }
+        app.mark_graphics_dirty();
     }
     app.poll_toast();
     let prev_w = app.viewport_width;
@@ -39,6 +40,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.viewport_width = area.width;
     app.viewport_height = area.height;
     if prev_w != area.width || prev_h != area.height {
+        app.mark_graphics_dirty();
         match app.page {
             Page::ThreadFeed => app.sync_feed_scroll(),
             Page::ThreadDetail => app.sync_detail_scroll(),
@@ -52,6 +54,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             _ => {}
         }
     }
+    // Kitty placement deletes only when geometry may have moved (scroll/layout/image).
+    // Idle tick frames still clear cells via fill_area_spaces, without d=y spam.
+    app.note_graphics_layout();
+    begin_frame_graphics(app.take_graphics_dirty());
 
     // Zero-area terminals: nothing to paint. Sub-shells also guard width/height == 0.
     if area.width == 0 || area.height == 0 {

@@ -24,15 +24,20 @@ pub fn navigate_to(app: &mut crate::app::App, page: Page) {
     if from != page && !matches!(from, Page::Startup | Page::Login) {
         app.nav_stack.push(from);
     }
+    if app.page != page {
+        app.mark_graphics_dirty();
+    }
     app.page = page;
 }
 
 pub fn navigate_back(app: &mut crate::app::App) -> bool {
     if let Some(page) = app.nav_stack.pop() {
+        app.mark_graphics_dirty();
         app.page = page;
         return true;
     }
     if !matches!(app.page, Page::Startup | Page::Login | Page::ThreadFeed) {
+        app.mark_graphics_dirty();
         app.page = Page::ThreadFeed;
         return true;
     }

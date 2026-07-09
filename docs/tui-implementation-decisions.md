@@ -78,7 +78,12 @@
   - 解码线程池：2–4 worker（非单线程）。  
   - Loading 占位高度按 `max_cols/2` 估（8–20），宽度用满内容列，减轻撑开。  
   - 滚动保持：decode 前后用 `(floor, offset_in_floor)` 锚点，禁止吸附楼顶（修「图未出完就滚再弹回」）。  
-- **暂缓**: 收紧 `clear_terminal_placements_in_area` 频率、重接 `erase_graphics_guard_band`——等残图路径稳定后再单独评估。
+- **Kitty placement 清理（2026-07-09）**:  
+  - `clear_content_viewport` / `clear_graphics_in_area` **仍每帧** `clear_rect` + `fill_area_spaces`（Sixel/格子覆盖）。  
+  - Kitty `d=y`（`clear_terminal_placements_in_area`）**仅在 geometry dirty 时**发送：scroll / 翻页 / resize / 图 decode / 首帧。由 `begin_frame_graphics` + `App::graphics_dirty` 控制。  
+  - WT 上 Content 走 Sixel，每帧 `d=y` 主要服务头像/表情 Kitty 层；空闲 tick 不再刷屏。  
+  - `d=y` 序列改为单次 write 批处理。  
+  - **`erase_graphics_guard_band` 仍废弃**，不重新接入。
 
 ---
 
@@ -213,3 +218,4 @@
 | 2026-07-09 | 楼层头：去重 `发表于`；`本帖最后由…编辑` 并入 chrome（`编辑于` / `由X编辑于`） |
 | 2026-07-09 | §4.3：vendor patch `ratatui-image` 修复 Sixel skip+drop 溢出残图 |
 | 2026-07-09 | §4.3：详情图视口懒加载、解码池、占位高度、scroll 楼内锚点 |
+| 2026-07-09 | §4.3：Kitty `d=y` 仅 geometry dirty 时发送；guard band 仍废弃 |

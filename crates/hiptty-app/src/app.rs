@@ -19,6 +19,34 @@ use crate::list_page::{ListPageState, PmThreadState};
 use crate::nav::NavStack;
 use crate::worker::WorkerRequest;
 
+/// Snapshot of UI geometry that affects Kitty placement positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GraphicsLayoutKey {
+    page: Page,
+    overlay: Overlay,
+    detail_scroll: u16,
+    feed_scroll: u16,
+    list_scroll: u16,
+    pm_scroll: u16,
+    viewport_w: u16,
+    viewport_h: u16,
+}
+
+impl GraphicsLayoutKey {
+    fn from_app(app: &App) -> Self {
+        Self {
+            page: app.page,
+            overlay: app.overlay,
+            detail_scroll: app.detail.scroll_top,
+            feed_scroll: app.feed.scroll_lines,
+            list_scroll: app.list_page.scroll_lines,
+            pm_scroll: app.pm_thread.scroll_lines,
+            viewport_w: app.viewport_width,
+            viewport_h: app.viewport_height,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MouseClickState {
     pub at: std::time::Instant,
@@ -217,6 +245,10 @@ pub struct App {
     pub image_fetch_queue: std::collections::VecDeque<FetchRequest>,
     /// In-flight `FetchImage` worker requests.
     pub image_fetches_in_flight: usize,
+    /// Next frame should emit Kitty placement deletes (scroll / layout / image ready).
+    pub graphics_dirty: bool,
+    /// Last geometry key for which we already issued a placement clear.
+    last_graphics_layout: Option<GraphicsLayoutKey>,
     /// Updated each frame for mouse hit-testing and scrollbar interaction.
     pub scroll_chrome: Option<ScrollChrome>,
     pub scrollbar_interaction: ScrollBarInteraction,
@@ -285,6 +317,8 @@ impl App {
             image_cache: None,
             image_fetch_queue: std::collections::VecDeque::new(),
             image_fetches_in_flight: 0,
+            graphics_dirty: true,
+            last_graphics_layout: None,
             scroll_chrome: None,
             scrollbar_interaction: ScrollBarInteraction::new(),
             title_bar_area: ratatui::layout::Rect::default(),
@@ -311,6 +345,27 @@ impl App {
 
     pub fn images_mut(&mut self) -> Option<&mut ImageCache> {
         self.image_cache.as_mut()
+    }
+
+    /// Mark that Kitty/Sixel geometry may have moved; next draw clears placements on WT.
+    pub fn mark_graphics_dirty(&mut self) {
+        self.graphics_dirty = true;
+    }
+
+    /// Consume the dirty flag for this frame (true on first paint after a graphics move).
+    pub fn take_graphics_dirty(&mut self) -> bool {
+        let dirty = self.graphics_dirty;
+        self.graphics_dirty = false;
+        dirty
+    }
+
+    /// If page/scroll/viewport changed since last clear, mark graphics dirty.
+    pub fn note_graphics_layout(&mut self) {
+        let key = GraphicsLayoutKey::from_app(self);
+        if self.last_graphics_layout != Some(key) {
+            self.graphics_dirty = true;
+            self.last_graphics_layout = Some(key);
+        }
     }
 
     /// Enqueue image HTTP jobs and dispatch up to [`IMAGE_FETCH_CONCURRENCY`] at a time.

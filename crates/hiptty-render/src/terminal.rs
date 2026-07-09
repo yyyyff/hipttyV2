@@ -39,14 +39,22 @@ pub fn clear_terminal_placements(height: u16) -> io::Result<()> {
 /// Delete Kitty placements intersecting `area` (1-indexed terminal rows).
 ///
 /// Image data stays in terminal memory; the next draw pass re-places visible rows only.
+///
+/// No-op outside Windows Terminal. Batches all `d=y` sequences into one write to cut
+/// syscall overhead when clearing a tall content pane.
 pub fn clear_terminal_placements_in_area(area: Rect) -> io::Result<()> {
     if !is_windows_terminal() || area.width == 0 || area.height == 0 {
         return Ok(());
     }
-    let mut out = io::stdout();
+    // "~20 bytes per row; cap growth for pathological heights.
+    let mut buf = String::with_capacity(area.height as usize * 24);
     for row in 0..area.height {
         let y = u32::from(area.y.saturating_add(row).saturating_add(1));
-        write!(out, "\x1b_Ga=d,d=y,y={y}\x1b\\")?;
+        // Kitty delete by row (1-indexed).
+        use std::fmt::Write as _;
+        let _ = write!(buf, "\x1b_Ga=d,d=y,y={y}\x1b\\");
     }
+    let mut out = io::stdout();
+    out.write_all(buf.as_bytes())?;
     out.flush()
 }
