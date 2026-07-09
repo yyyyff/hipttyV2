@@ -44,7 +44,7 @@
 - 详情页 `#` 跳楼层、`Enter` 引用跳转、`o` 打开附件/链接
 - 投票块排版与高亮（延后）  
 - 楼层头部/间距/竖线动画等视觉微调  
-- 全量 prefetch 改视口懒加载（性能）  
+- ~~全量 prefetch 改视口懒加载~~（2026-07-09：详情图已做视口 ±1 + 并发 3）
 - 恢复 `erase_graphics_guard_band` 每帧擦洗（见 §4）
 
 ---
@@ -72,7 +72,13 @@
 - **WT 详情大图滚动溢出（2026-07-09）**: 帖子 Content 图在 WT 上走 Sixel + `SlicedImage`。当图同时被上裁（`skip>0`）与下裁（`drop>0`）时，上游 `ratatui-image` 11.0.6 的 `SlicedSixelData::bands` 按 `(height - drop)` 取 band，**未扣 skip**，Sixel 序列比 `image_area` 更高，像素溢出进 Status Bar，再滚形成残图。仅上裁或仅下裁、或图完整入屏时不复现。  
   - **修复**: `[patch.crates-io]` → `vendor/ratatui-image`（基于 11.0.6），见 `vendor/ratatui-image/PATCHES.md`。  
   - 与 §4.1 guard band、Kitty placement 清理是不同路径；勿用每帧 guard band 顶替。  
-- 详情页图片 prefetch：暂不优化。
+- **图片缓存**: Content/Avatar/Smiley 均为进程内 `ImageCache` 内存缓存（decode + 协议数据）。同会话再进帖不会再占位；**无** Content 磁盘缓存。Avatar 另有 `AvatarDiskCache`。  
+- **详情图片性能（2026-07-09）**:  
+  - 视口懒加载：只 prefetch 可见楼层 ±1，滚动时再补；HTTP 并发上限 3。  
+  - 解码线程池：2–4 worker（非单线程）。  
+  - Loading 占位高度按 `max_cols/2` 估（8–20），宽度用满内容列，减轻撑开。  
+  - 滚动保持：decode 前后用 `(floor, offset_in_floor)` 锚点，禁止吸附楼顶（修「图未出完就滚再弹回」）。  
+- **暂缓**: 收紧 `clear_terminal_placements_in_area` 频率、重接 `erase_graphics_guard_band`——等残图路径稳定后再单独评估。
 
 ---
 
@@ -206,3 +212,4 @@
 | 2026-07-09 | 详情正文：引用头去重（`@author in time`）；空白折叠；表情行内；underline/strike |
 | 2026-07-09 | 楼层头：去重 `发表于`；`本帖最后由…编辑` 并入 chrome（`编辑于` / `由X编辑于`） |
 | 2026-07-09 | §4.3：vendor patch `ratatui-image` 修复 Sixel skip+drop 溢出残图 |
+| 2026-07-09 | §4.3：详情图视口懒加载、解码池、占位高度、scroll 楼内锚点 |

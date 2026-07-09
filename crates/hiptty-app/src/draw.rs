@@ -21,7 +21,18 @@ use crate::mouse::install_scroll_chrome;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
-    let _images_changed = app.images_mut().map(|cache| cache.poll()).unwrap_or(false);
+    // Decode completion changes content heights; re-anchor mid-floor scroll, not floor tops.
+    let scroll_anchor = if app.page == Page::ThreadDetail {
+        app.capture_detail_scroll_anchor()
+    } else {
+        None
+    };
+    let images_changed = app.images_mut().map(|cache| cache.poll()).unwrap_or(false);
+    if images_changed {
+        if let Some(anchor) = scroll_anchor {
+            app.restore_detail_scroll_anchor(anchor);
+        }
+    }
     app.poll_toast();
     let prev_w = app.viewport_width;
     let prev_h = app.viewport_height;

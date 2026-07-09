@@ -126,6 +126,66 @@ pub fn first_visible_floor(
     posts.len().saturating_sub(1)
 }
 
+/// Anchor for keeping the viewport stable across layout reflows (image decode, append).
+///
+/// Stores the first visible floor and the scroll offset *within* that floor — not the floor
+/// top alone, which would yank the user back when they had scrolled mid-floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetailScrollAnchor {
+    pub floor: usize,
+    pub offset_in_floor: u16,
+}
+
+pub fn capture_detail_scroll_anchor(
+    scroll_top: u16,
+    posts: &[Post],
+    width: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> DetailScrollAnchor {
+    if posts.is_empty() {
+        return DetailScrollAnchor {
+            floor: 0,
+            offset_in_floor: 0,
+        };
+    }
+    let floor = first_visible_floor(scroll_top, posts, width, palette, images);
+    let offsets = floor_offsets(posts, width, palette, images);
+    let floor_top = offsets.get(floor).copied().unwrap_or(0);
+    DetailScrollAnchor {
+        floor,
+        offset_in_floor: scroll_top.saturating_sub(floor_top),
+    }
+}
+
+/// Restore [`DetailScrollAnchor`] after heights changed (e.g. images became Ready).
+pub fn restore_detail_scroll_anchor(
+    anchor: DetailScrollAnchor,
+    posts: &[Post],
+    width: u16,
+    viewport_h: u16,
+    palette: Palette,
+    images: Option<&ImageCache>,
+) -> u16 {
+    if posts.is_empty() {
+        return 0;
+    }
+    let floor = anchor.floor.min(posts.len().saturating_sub(1));
+    let offsets = floor_offsets(posts, width, palette, images);
+    let floor_top = offsets.get(floor).copied().unwrap_or(0);
+    let floor_h = measure_floor(
+        &posts[floor],
+        width,
+        palette,
+        images,
+        floor + 1 < posts.len(),
+    );
+    // Keep the same offset into the floor, clamped so we never past the floor end alone.
+    let max_intra = floor_h.saturating_sub(1);
+    let target = floor_top.saturating_add(anchor.offset_in_floor.min(max_intra));
+    clamp_scroll_top(target, posts, width, viewport_h, palette, images)
+}
+
 /// Floor index containing document line `line` (0-based from the list top).
 pub fn floor_index_at_line(
     line: u16,
@@ -1167,6 +1227,21 @@ mod tests {
             floor_index_at_line(offsets[1] + floor_h - 1, &posts, 80, palette, None),
             1
         );
+    }
+
+    #[test]
+    fn detail_scroll_anchor_keeps_mid_floor_offset() {
+        let posts = vec![sample_post(); 6];
+        let palette = Palette::default();
+        let h = measure_floor(&posts[0], 80, palette, None, true);
+        let viewport = h; // one floor tall → mid-list scroll is valid
+        let scroll = h + 3; // mid floor 1
+        let anchor = capture_detail_scroll_anchor(scroll, &posts, 80, palette, None);
+        assert_eq!(anchor.floor, 1);
+        assert_eq!(anchor.offset_in_floor, 3);
+        let restored =
+            restore_detail_scroll_anchor(anchor, &posts, 80, viewport, palette, None);
+        assert_eq!(restored, scroll);
     }
 
     #[test]

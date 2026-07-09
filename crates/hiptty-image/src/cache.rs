@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc,
+    mpsc::{self, Receiver},
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 
@@ -96,7 +96,7 @@ pub struct ImageCache {
     avatar_disk: Option<AvatarDiskCache>,
     avatar_placeholder: Option<ImageEntry>,
     entries: HashMap<String, ImageEntry>,
-    job_tx: Sender<DecodeJob>,
+    job_tx: DecodeJobTx,
     result_rx: Receiver<DecodeResult>,
 }
 
@@ -108,22 +108,91 @@ impl std::fmt::Debug for ImageCache {
     }
 }
 
+/// Parallel decode workers (JPEG/PNG → terminal protocol). Bounded so many large
+/// content images do not thrash the machine; HTTP fetch concurrency is separate.
+fn decode_worker_count() -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
+struct DecodeQueue {
+    jobs: Mutex<VecDeque<DecodeJob>>,
+    cvar: Condvar,
+    closed: Mutex<bool>,
+}
+
+impl DecodeQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            jobs: Mutex::new(VecDeque::new()),
+            cvar: Condvar::new(),
+            closed: Mutex::new(false),
+        })
+    }
+
+    fn push(&self, job: DecodeJob) {
+        let mut q = self.jobs.lock().expect("decode queue lock");
+        q.push_back(job);
+        self.cvar.notify_one();
+    }
+
+    fn pop(&self) -> Option<DecodeJob> {
+        let mut q = self.jobs.lock().expect("decode queue lock");
+        loop {
+            if let Some(job) = q.pop_front() {
+                return Some(job);
+            }
+            if *self.closed.lock().expect("decode closed lock") {
+                return None;
+            }
+            q = self.cvar.wait(q).expect("decode queue wait");
+        }
+    }
+}
+
+/// Sender side: enqueue decode work for the worker pool.
+struct DecodeJobTx {
+    queue: Arc<DecodeQueue>,
+}
+
+impl DecodeJobTx {
+    fn send(&self, job: DecodeJob) -> Result<(), ()> {
+        if *self.queue.closed.lock().expect("decode closed lock") {
+            return Err(());
+        }
+        self.queue.push(job);
+        Ok(())
+    }
+}
+
 impl ImageCache {
     pub fn new(picker: Picker, avatar_disk: Option<AvatarDiskCache>) -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<DecodeJob>();
         let (result_tx, result_rx) = mpsc::channel::<DecodeResult>();
-        let worker_picker = picker.clone();
-
-        thread::spawn(move || {
-            while let Ok(job) = job_rx.recv() {
-                let result = decode_image(&worker_picker, job.kind, &job.bytes).map_err(|_| ());
-                let _ = result_tx.send(DecodeResult {
-                    url: job.url,
-                    kind: job.kind,
-                    result,
-                });
-            }
-        });
+        let queue = DecodeQueue::new();
+        let job_tx = DecodeJobTx {
+            queue: Arc::clone(&queue),
+        };
+        let workers = decode_worker_count();
+        for _ in 0..workers {
+            let queue = Arc::clone(&queue);
+            let result_tx = result_tx.clone();
+            let worker_picker = picker.clone();
+            thread::spawn(move || {
+                while let Some(job) = queue.pop() {
+                    let result =
+                        decode_image(&worker_picker, job.kind, &job.bytes).map_err(|_| ());
+                    let _ = result_tx.send(DecodeResult {
+                        url: job.url,
+                        kind: job.kind,
+                        result,
+                    });
+                }
+            });
+        }
+        // Drop the original result_tx so workers' clones keep the channel open.
+        drop(result_tx);
 
         let avatar_placeholder = noavatar_bytes().and_then(|bytes| {
             decode_image(&picker, ImageKind::Avatar, &bytes)

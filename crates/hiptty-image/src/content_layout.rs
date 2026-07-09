@@ -396,7 +396,8 @@ fn image_block(cache_key: String, kind: ImageKind, cache: &ImageCache) -> Conten
 fn image_loading_width(kind: ImageKind) -> u16 {
     match kind {
         ImageKind::Smiley => SMILEY_COLS,
-        ImageKind::Content { max_cols } => max_cols.clamp(4, 12),
+        // Full content width so horizontal layout does not jump when Ready.
+        ImageKind::Content { max_cols } => max_cols.max(4),
         ImageKind::Avatar => crate::layout::AVATAR_COLS,
     }
 }
@@ -404,9 +405,17 @@ fn image_loading_width(kind: ImageKind) -> u16 {
 fn image_loading_height(kind: ImageKind) -> u16 {
     match kind {
         ImageKind::Smiley => SMILEY_ROWS,
-        ImageKind::Content { .. } => 4,
+        // Estimate square-ish image at full width. With typical ~½-width font cells,
+        // square pixel image → ~max_cols/2 rows. Clamp so short posts stay compact
+        // but tall phone screenshots do not explode from a 4-row stub into 30+.
+        ImageKind::Content { max_cols } => content_loading_height_estimate(max_cols),
         ImageKind::Avatar => crate::layout::AVATAR_ROWS,
     }
+}
+
+/// Placeholder rows before pixels are known (no HTML pixel size in our model).
+pub fn content_loading_height_estimate(max_cols: u16) -> u16 {
+    (max_cols / 2).clamp(8, 20)
 }
 
 fn image_fail_width(kind: ImageKind) -> u16 {
@@ -629,9 +638,11 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{name} missing image block"));
             assert!(!image.1, "{name} should not be failed");
+            let loading_h = content_loading_height_estimate(79u16.saturating_sub(2));
             assert!(
-                image.0 > 4,
-                "{name} ready image should exceed loading placeholder"
+                image.0 >= loading_h || image.0 > 4,
+                "{name} ready image height {} should be non-trivial (loading est {loading_h})",
+                image.0
             );
         }
     }

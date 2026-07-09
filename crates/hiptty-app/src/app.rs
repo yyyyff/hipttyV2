@@ -5,7 +5,8 @@ use hiptty_core::{
 use hiptty_image::{AvatarDiskCache, FetchRequest, ImageCache};
 use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
-    clamp_scroll_top, ensure_scroll_top, first_visible_floor, floor_offsets, forum_picker_entries,
+    capture_detail_scroll_anchor, clamp_scroll_top, ensure_scroll_top, forum_picker_entries,
+    restore_detail_scroll_anchor,
     loading_status_label, page_status_label, snap_scroll_to_item, thread_list_capacity, KeyHint,
     LoginField, ScrollBarInteraction, ScrollChrome, TitleBarHits, TOAST_ERROR_TICKS,
     TOAST_SUCCESS_TICKS, SCROLLBAR_COLS,
@@ -212,6 +213,10 @@ pub struct App {
     pub settings_path: std::path::PathBuf,
     pub startup_done: bool,
     pub image_cache: Option<ImageCache>,
+    /// HTTP image fetches waiting to be dispatched (viewport lazy load + concurrency cap).
+    pub image_fetch_queue: std::collections::VecDeque<FetchRequest>,
+    /// In-flight `FetchImage` worker requests.
+    pub image_fetches_in_flight: usize,
     /// Updated each frame for mouse hit-testing and scrollbar interaction.
     pub scroll_chrome: Option<ScrollChrome>,
     pub scrollbar_interaction: ScrollBarInteraction,
@@ -221,6 +226,9 @@ pub struct App {
     pub settings_hits: Vec<ratatui::layout::Rect>,
     pub last_click: Option<MouseClickState>,
 }
+
+/// Max concurrent image HTTP fetches (decode is separate, multi-threaded in ImageCache).
+pub const IMAGE_FETCH_CONCURRENCY: usize = 3;
 
 impl App {
     pub fn new(settings: AppSettings, config_dir: std::path::PathBuf, profile: String) -> Self {
@@ -275,6 +283,8 @@ impl App {
             settings_path,
             startup_done: false,
             image_cache: None,
+            image_fetch_queue: std::collections::VecDeque::new(),
+            image_fetches_in_flight: 0,
             scroll_chrome: None,
             scrollbar_interaction: ScrollBarInteraction::new(),
             title_bar_area: ratatui::layout::Rect::default(),
@@ -303,16 +313,50 @@ impl App {
         self.image_cache.as_mut()
     }
 
+    /// Enqueue image HTTP jobs and dispatch up to [`IMAGE_FETCH_CONCURRENCY`] at a time.
     pub fn dispatch_image_fetches(
-        &self,
+        &mut self,
         requests: impl IntoIterator<Item = FetchRequest>,
         worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
     ) {
         for req in requests {
-            let _ = worker_tx.send(WorkerRequest::FetchImage {
-                url: req.url,
-                kind: req.kind,
-            });
+            // Dedupe against queue (same url already waiting).
+            if self
+                .image_fetch_queue
+                .iter()
+                .any(|q| q.url == req.url && q.kind == req.kind)
+            {
+                continue;
+            }
+            self.image_fetch_queue.push_back(req);
+        }
+        self.pump_image_fetch_queue(worker_tx);
+    }
+
+    pub fn on_image_fetch_finished(
+        &mut self,
+        worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    ) {
+        self.image_fetches_in_flight = self.image_fetches_in_flight.saturating_sub(1);
+        self.pump_image_fetch_queue(worker_tx);
+    }
+
+    fn pump_image_fetch_queue(&mut self, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+        while self.image_fetches_in_flight < IMAGE_FETCH_CONCURRENCY {
+            let Some(req) = self.image_fetch_queue.pop_front() else {
+                break;
+            };
+            if worker_tx
+                .send(WorkerRequest::FetchImage {
+                    url: req.url,
+                    kind: req.kind,
+                })
+                .is_ok()
+            {
+                self.image_fetches_in_flight += 1;
+            } else {
+                break;
+            }
         }
     }
 
@@ -635,7 +679,10 @@ impl App {
             snap_scroll_to_item(self.feed.selected, self.feed.scroll_lines, viewport, item_h);
     }
 
-    /// Keep the top visible floor anchored after layout changes (append, image measure).
+    /// Keep the mid-floor scroll position after layout reflows (append, image decode).
+    ///
+    /// Anchors `(first_visible_floor, offset_within_floor)` rather than snapping to the floor
+    /// top — otherwise j/k or wheel mid-floor jumps back when images become Ready.
     pub fn preserve_detail_scroll(&mut self) {
         let Some(detail) = &self.detail.detail else {
             return;
@@ -647,17 +694,61 @@ impl App {
         let width = self.content_width();
         let palette = self.palette();
         let images = self.images();
-        let anchor = first_visible_floor(
+        let anchor = capture_detail_scroll_anchor(
             self.detail.scroll_top,
             &detail.posts,
             width,
             palette,
             images,
         );
-        let offsets = floor_offsets(&detail.posts, width, palette, images);
-        let anchored = offsets.get(anchor).copied().unwrap_or(0);
-        self.detail.scroll_top =
-            clamp_scroll_top(anchored, &detail.posts, width, viewport, palette, images);
+        self.detail.scroll_top = restore_detail_scroll_anchor(
+            anchor,
+            &detail.posts,
+            width,
+            viewport,
+            palette,
+            images,
+        );
+    }
+
+    /// Capture scroll anchor using *current* image heights (call before cache.poll).
+    pub fn capture_detail_scroll_anchor(&self) -> Option<hiptty_widgets::DetailScrollAnchor> {
+        let detail = self.detail.detail.as_ref()?;
+        if detail.posts.is_empty() {
+            return None;
+        }
+        Some(capture_detail_scroll_anchor(
+            self.detail.scroll_top,
+            &detail.posts,
+            self.content_width(),
+            self.palette(),
+            self.images(),
+        ))
+    }
+
+    /// Restore a previously captured anchor after heights changed.
+    pub fn restore_detail_scroll_anchor(
+        &mut self,
+        anchor: hiptty_widgets::DetailScrollAnchor,
+    ) {
+        let Some(detail) = &self.detail.detail else {
+            return;
+        };
+        if detail.posts.is_empty() {
+            return;
+        }
+        let viewport = self.scroll_viewport_height();
+        let width = self.content_width();
+        let palette = self.palette();
+        let images = self.images();
+        self.detail.scroll_top = restore_detail_scroll_anchor(
+            anchor,
+            &detail.posts,
+            width,
+            viewport,
+            palette,
+            images,
+        );
     }
 
     /// Content width below title/status, reserving the scrollbar column when possible.

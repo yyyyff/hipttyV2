@@ -304,6 +304,7 @@ fn handle_detail_key(
                     app.images(),
                 );
                 maybe_load_more_detail(app, worker_tx);
+                prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
@@ -332,6 +333,7 @@ fn handle_detail_key(
                     palette,
                     app.images(),
                 );
+                prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::PageDown => {
@@ -359,6 +361,7 @@ fn handle_detail_key(
                     app.images(),
                 );
                 maybe_load_more_detail(app, worker_tx);
+                prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::PageUp => {
@@ -385,6 +388,7 @@ fn handle_detail_key(
                     palette,
                     app.images(),
                 );
+                prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::Char('g') => {
@@ -771,9 +775,9 @@ pub fn handle_worker_response(
             if let Some(cache) = app.images_mut() {
                 cache.apply_fetch(url, kind, outcome);
             }
-            if app.page == crate::app::Page::ThreadDetail {
-                app.preserve_detail_scroll();
-            }
+            // Height only changes when decode finishes (cache.poll in draw); do not yank
+            // scroll here. Drain the in-flight image queue for the next fetches.
+            app.on_image_fetch_finished(worker_tx);
         }
         WorkerResponse::SimpleListLoaded { .. }
         | WorkerResponse::PmThreadLoaded { .. }
@@ -785,22 +789,67 @@ pub fn handle_worker_response(
     }
 }
 
+/// Floors before/after the visible range to warm for smooth scroll.
+const DETAIL_IMAGE_PREFETCH_PAD: usize = 1;
+
+/// Prefetch detail images near the current viewport (not the whole page).
 pub fn prefetch_detail_images(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
-    let posts: Vec<_> = app
+    prefetch_detail_viewport_images(app, worker_tx);
+}
+
+/// Prefetch only floors in `[first - pad, last + pad]` for current scroll.
+pub fn prefetch_detail_viewport_images(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let posts = app
         .detail
         .detail
         .as_ref()
-        .map(|detail| detail.posts.clone())
+        .map(|d| d.posts.clone())
         .unwrap_or_default();
-    prefetch_detail_posts(app, &posts, worker_tx);
+    if posts.is_empty() {
+        return;
+    }
+    let width = app.content_width();
+    let viewport = app.scroll_viewport_height();
+    let scroll = app.detail.scroll_top;
+    let palette = app.palette();
+    let (first, last) = {
+        let images = app.images();
+        let first =
+            hiptty_widgets::first_visible_floor(scroll, &posts, width, palette, images);
+        let last = hiptty_widgets::last_visible_floor(
+            scroll, &posts, width, viewport, palette, images,
+        );
+        (first, last)
+    };
+    let start = first.saturating_sub(DETAIL_IMAGE_PREFETCH_PAD);
+    let end = last
+        .saturating_add(DETAIL_IMAGE_PREFETCH_PAD)
+        .min(posts.len().saturating_sub(1));
+    let mut jobs = Vec::new();
+    if let Some(cache) = app.images_mut() {
+        jobs.extend(hiptty_image::prefetch_posts_range(
+            cache, &posts, start, end, width,
+        ));
+    }
+    app.dispatch_image_fetches(jobs, worker_tx);
 }
 
+/// Prefetch images for newly appended floors only (still pad around viewport when possible).
 fn prefetch_detail_posts(
     app: &mut App,
     posts: &[hiptty_core::Post],
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
-    let width = app.viewport_width.saturating_sub(1);
+    if posts.is_empty() {
+        return;
+    }
+    // After append, warm the new posts (they sit at the end) via the viewport path if
+    // the user is near the bottom; also request jobs for the appended slice so lazy-load
+    // append does not wait for another scroll.
+    let width = app.content_width();
     let mut jobs = Vec::new();
     if let Some(cache) = app.images_mut() {
         for post in posts {
@@ -808,6 +857,7 @@ fn prefetch_detail_posts(
         }
     }
     app.dispatch_image_fetches(jobs, worker_tx);
+    prefetch_detail_viewport_images(app, worker_tx);
 }
 
 fn prefetch_feed_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {

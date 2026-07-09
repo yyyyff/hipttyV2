@@ -10,7 +10,9 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::app::{App, MouseClickState, Overlay, Page};
-use crate::event::{maybe_load_more, maybe_load_more_detail, open_thread_detail};
+use crate::event::{
+    maybe_load_more, maybe_load_more_detail, open_thread_detail, prefetch_detail_viewport_images,
+};
 use crate::handlers::{
     activate_main_menu_item, activate_settings_row, maybe_load_more_list, open_list_selection,
     switch_feed_forum,
@@ -284,6 +286,7 @@ fn apply_scroll_offset(
                     clamp_scroll_top(offset, posts, width, viewport, palette, images)
                 };
                 maybe_load_more_detail(app, worker_tx);
+                prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         Page::PmList
