@@ -1,5 +1,5 @@
 use hiptty_core::{ContentNode, ContentSpan, Post};
-use hiptty_render::{wrap_plain, wrap_segments, Palette, StyledSegment};
+use hiptty_render::{quote_header_label, str_width, wrap_plain, Palette};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -11,6 +11,17 @@ use crate::layout::{SMILEY_COLS, SMILEY_ROWS};
 use crate::smiley::smiley_cache_key;
 
 #[derive(Debug, Clone)]
+pub enum InlinePart {
+    Text(Line<'static>),
+    Smiley {
+        key: String,
+        width: u16,
+        height: u16,
+        failed: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub enum ContentBlock {
     Text(Line<'static>),
     Image {
@@ -19,6 +30,11 @@ pub enum ContentBlock {
         height: u16,
         failed: bool,
     },
+    /// One display row mixing text and inline smileys (original post flow).
+    Inline {
+        parts: Vec<InlinePart>,
+    },
+    /// Full-row smiley (kept for height math; normally smileys are in `Inline`).
     Smiley {
         key: String,
         width: u16,
@@ -32,6 +48,14 @@ impl ContentBlock {
         match self {
             Self::Text(_) => 1,
             Self::Image { height, .. } | Self::Smiley { height, .. } => *height,
+            Self::Inline { parts } => parts
+                .iter()
+                .map(|p| match p {
+                    InlinePart::Text(_) => 1,
+                    InlinePart::Smiley { height, .. } => *height,
+                })
+                .max()
+                .unwrap_or(1),
         }
     }
 }
@@ -49,15 +73,14 @@ pub fn layout_post_blocks(
 
     let mut blocks = Vec::new();
     for node in &post.content {
-        blocks.extend(layout_content_node(node, max_cols, palette, cache));
-        if !blocks.is_empty() {
-            blocks.push(ContentBlock::Text(Line::from("")));
+        let chunk = layout_content_node(node, max_cols, palette, cache);
+        if chunk.is_empty() {
+            continue;
         }
+        blocks.extend(chunk);
+        blocks.push(ContentBlock::Text(Line::from("")));
     }
-    while matches!(blocks.last(), Some(ContentBlock::Text(line)) if line.spans.iter().all(|s| s.content.is_empty()))
-    {
-        blocks.pop();
-    }
+    collapse_empty_blocks(&mut blocks);
     blocks
 }
 
@@ -71,10 +94,16 @@ fn layout_content_node(
         ContentNode::Text { spans } => layout_text_spans(spans, max_cols, palette, cache),
         ContentNode::Quote {
             author,
-            time: _,
+            time,
             text,
             ..
-        } => layout_quote(author.as_deref(), text, max_cols, palette),
+        } => layout_quote(
+            author.as_deref(),
+            time.as_deref(),
+            text,
+            max_cols,
+            palette,
+        ),
         ContentNode::Image { url, thumb_url, .. } => {
             let image_url = thumb_url.as_deref().unwrap_or(url.as_str()).to_string();
             vec![image_block(
@@ -111,33 +140,38 @@ fn layout_content_node(
     }
 }
 
+enum LayoutAtom {
+    Char(char, Style),
+    Smiley {
+        key: String,
+        width: u16,
+        height: u16,
+        failed: bool,
+    },
+    Break,
+}
+
 fn layout_text_spans(
     spans: &[ContentSpan],
     max_cols: usize,
     palette: Palette,
     cache: &ImageCache,
 ) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-    let mut segments = Vec::new();
+    if max_cols == 0 {
+        return Vec::new();
+    }
 
-    let flush_text = |segments: &mut Vec<StyledSegment>, blocks: &mut Vec<ContentBlock>| {
-        if segments.is_empty() {
-            return;
-        }
-        for line in wrap_segments(segments, max_cols) {
-            blocks.push(ContentBlock::Text(line));
-        }
-        segments.clear();
-    };
-
+    let mut atoms = Vec::new();
     for span in spans {
         match span {
             ContentSpan::Text { text, style, .. } => {
-                if !text.is_empty() {
-                    segments.push(StyledSegment {
-                        text: text.clone(),
-                        style: core_style_to_ratatui(style, palette),
-                    });
+                let st = core_style_to_ratatui(style, palette);
+                for ch in text.chars() {
+                    if ch == '\n' {
+                        atoms.push(LayoutAtom::Break);
+                    } else {
+                        atoms.push(LayoutAtom::Char(ch, st));
+                    }
                 }
             }
             ContentSpan::Smiley {
@@ -145,18 +179,167 @@ fn layout_text_spans(
                 code,
                 smilie_id,
             } => {
-                flush_text(&mut segments, &mut blocks);
                 let key = smiley_cache_key(code.as_deref(), smilie_id.as_deref(), url);
-                blocks.push(image_block(key, ImageKind::Smiley, cache));
+                let block = image_block(key, ImageKind::Smiley, cache);
+                if let ContentBlock::Smiley {
+                    key,
+                    width,
+                    height,
+                    failed,
+                } = block
+                {
+                    atoms.push(LayoutAtom::Smiley {
+                        key,
+                        width,
+                        height,
+                        failed,
+                    });
+                }
             }
         }
     }
-    flush_text(&mut segments, &mut blocks);
+
+    pack_atoms(atoms, max_cols)
+}
+
+fn pack_atoms(atoms: Vec<LayoutAtom>, max_cols: usize) -> Vec<ContentBlock> {
+    let mut rows: Vec<Vec<InlinePart>> = vec![Vec::new()];
+    let mut row_w = 0usize;
+    let mut text_run = String::new();
+    let mut text_style = Style::default();
+    let mut has_style = false;
+
+    let flush_text = |rows: &mut [Vec<InlinePart>],
+                      text_run: &mut String,
+                      text_style: Style,
+                      has_style: &mut bool| {
+        if text_run.is_empty() {
+            return;
+        }
+        let style = if *has_style {
+            text_style
+        } else {
+            Style::default()
+        };
+        rows.last_mut().unwrap().push(InlinePart::Text(Line::from(
+            Span::styled(std::mem::take(text_run), style),
+        )));
+        *has_style = false;
+    };
+
+    let new_row = |rows: &mut Vec<Vec<InlinePart>>, row_w: &mut usize| {
+        rows.push(Vec::new());
+        *row_w = 0;
+    };
+
+    for atom in atoms {
+        match atom {
+            LayoutAtom::Break => {
+                flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+                new_row(&mut rows, &mut row_w);
+            }
+            LayoutAtom::Char(ch, style) => {
+                let ch_w = str_width(&ch.to_string());
+                if row_w + ch_w > max_cols && row_w > 0 {
+                    flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+                    new_row(&mut rows, &mut row_w);
+                }
+                if text_run.is_empty() {
+                    text_style = style;
+                    has_style = true;
+                } else if has_style && text_style != style {
+                    flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+                    text_style = style;
+                    has_style = true;
+                }
+                text_run.push(ch);
+                row_w += ch_w;
+            }
+            LayoutAtom::Smiley {
+                key,
+                width,
+                height,
+                failed,
+            } => {
+                let w = width as usize;
+                if row_w + w > max_cols && row_w > 0 {
+                    flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+                    new_row(&mut rows, &mut row_w);
+                }
+                flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+                rows.last_mut().unwrap().push(InlinePart::Smiley {
+                    key,
+                    width,
+                    height,
+                    failed,
+                });
+                row_w += w;
+            }
+        }
+    }
+    flush_text(&mut rows, &mut text_run, text_style, &mut has_style);
+
+    let mut blocks = Vec::new();
+    for parts in rows {
+        if parts.is_empty() {
+            blocks.push(ContentBlock::Text(Line::from("")));
+            continue;
+        }
+        let has_smiley = parts
+            .iter()
+            .any(|p| matches!(p, InlinePart::Smiley { .. }));
+        if !has_smiley {
+            // Merge pure-text parts into one Line.
+            let mut spans = Vec::new();
+            for part in parts {
+                if let InlinePart::Text(line) = part {
+                    spans.extend(line.spans);
+                }
+            }
+            blocks.push(ContentBlock::Text(if spans.is_empty() {
+                Line::from("")
+            } else {
+                Line::from(spans)
+            }));
+        } else {
+            blocks.push(ContentBlock::Inline { parts });
+        }
+    }
+
+    collapse_empty_blocks(&mut blocks);
     blocks
+}
+
+fn collapse_empty_blocks(blocks: &mut Vec<ContentBlock>) {
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut last_blank = false;
+    for block in blocks.drain(..) {
+        let blank = matches!(&block, ContentBlock::Text(line) if line_is_blank(line));
+        if blank {
+            if !last_blank && !out.is_empty() {
+                out.push(block);
+            }
+            last_blank = true;
+        } else {
+            out.push(block);
+            last_blank = false;
+        }
+    }
+    while matches!(out.last(), Some(ContentBlock::Text(line)) if line_is_blank(line)) {
+        out.pop();
+    }
+    *blocks = out;
+}
+
+fn line_is_blank(line: &Line<'_>) -> bool {
+    line.spans
+        .iter()
+        .all(|s| s.content.chars().all(|c| c.is_whitespace()))
 }
 
 fn layout_quote(
     author: Option<&str>,
+    time: Option<&str>,
     text: &str,
     max_cols: usize,
     palette: Palette,
@@ -167,10 +350,7 @@ fn layout_quote(
         return Vec::new();
     }
 
-    let header = match author {
-        Some(a) => format!("@{} 说:", a),
-        None => "@? 说:".to_string(),
-    };
+    let header = quote_header_label(author, time);
     let mut blocks = Vec::new();
     for line in wrap_plain(
         &header,
@@ -250,7 +430,9 @@ fn image_fail_height(kind: ImageKind) -> u16 {
 fn core_style_to_ratatui(style: &hiptty_core::Style, palette: Palette) -> Style {
     let mut out = palette.foreground_style();
     if let Some(fg) = style.fg.as_deref() {
-        if let Some(color) = hiptty_render::parse_hex_color(fg) {
+        if let Some(color) = hiptty_render::parse_hex_color(fg)
+            .or_else(|| parse_named_color(fg, palette))
+        {
             out = out.fg(color);
         }
     }
@@ -260,7 +442,23 @@ fn core_style_to_ratatui(style: &hiptty_core::Style, palette: Palette) -> Style 
     if style.italic {
         out = out.add_modifier(Modifier::ITALIC);
     }
+    if style.underline {
+        out = out.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.strikethrough {
+        out = out.add_modifier(Modifier::CROSSED_OUT);
+    }
     out
+}
+
+fn parse_named_color(name: &str, palette: Palette) -> Option<ratatui::style::Color> {
+    match name.to_ascii_lowercase().as_str() {
+        "gray" | "grey" => Some(palette.muted),
+        "red" => Some(palette.error),
+        "blue" => Some(palette.link),
+        "green" => Some(palette.success),
+        _ => None,
+    }
 }
 
 fn format_attachment_size(size: Option<u64>) -> String {
@@ -295,6 +493,66 @@ mod tests {
                 Some(ImageState::Failed) => return,
                 _ => thread::sleep(Duration::from_millis(2)),
             }
+        }
+    }
+
+    #[test]
+    fn smileys_pack_inline_with_surrounding_text() {
+        let picker = Picker::halfblocks();
+        let cache = ImageCache::new(picker, None);
+        let palette = Palette::default();
+        let post = Post {
+            pid: "1".into(),
+            floor: 1,
+            author: "u".into(),
+            uid: None,
+            avatar_url: None,
+            time: "t".into(),
+            content: vec![ContentNode::Text {
+                spans: vec![
+                    ContentSpan::Text {
+                        text: "hi".into(),
+                        style: Style::default(),
+                        url: None,
+                    },
+                    ContentSpan::Smiley {
+                        url: "https://img02.4d4y.com/forum/images/smilies/default/lol.gif".into(),
+                        code: Some("default_lol".into()),
+                        smilie_id: Some("9".into()),
+                    },
+                    ContentSpan::Text {
+                        text: "there".into(),
+                        style: Style::default(),
+                        url: None,
+                    },
+                ],
+            }],
+            poll: None,
+            page: 1,
+            warned: false,
+            signature: None,
+            edited_by: None,
+            edited_at: None,
+        };
+        let blocks = layout_post_blocks(&post, 40, palette, &cache);
+        let inline = blocks.iter().find(|b| matches!(b, ContentBlock::Inline { .. }));
+        assert!(
+            inline.is_some(),
+            "expected a single Inline row, got {blocks:?}"
+        );
+        if let Some(ContentBlock::Inline { parts }) = inline {
+            assert!(parts.len() >= 3, "text + smiley + text, got {parts:?}");
+            assert!(matches!(parts[0], InlinePart::Text(_)));
+            assert!(matches!(parts[1], InlinePart::Smiley { .. }));
+            assert!(matches!(parts[2], InlinePart::Text(_)));
+            assert_eq!(
+                blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::Inline { .. } | ContentBlock::Smiley { .. }))
+                    .count(),
+                1,
+                "smiley should not force its own full-width row"
+            );
         }
     }
 
@@ -359,6 +617,8 @@ mod tests {
                 page: 1,
                 warned: false,
                 signature: None,
+                edited_by: None,
+                edited_at: None,
             };
             let blocks = layout_post_blocks(&post, 79, palette, &cache);
             let image = blocks

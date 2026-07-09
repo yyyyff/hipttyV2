@@ -35,6 +35,10 @@ impl<'a> ContentBuilder<'a> {
 
     fn finish(mut self) -> Vec<ContentNode> {
         self.flush_spans();
+        for node in &mut self.nodes {
+            normalize_node_text(node);
+        }
+        trim_trailing_empty_nodes(&mut self.nodes);
         self.nodes
     }
 
@@ -126,8 +130,7 @@ impl<'a> ContentBuilder<'a> {
         for child in element.children() {
             match child.value() {
                 Node::Text(text) => {
-                    let t = text.replace(['<', '>'], " ");
-                    if !t.trim().is_empty() {
+                    if let Some(t) = normalize_html_text(text) {
                         self.push_plain_with_urls(&t, &style);
                     }
                 }
@@ -150,7 +153,11 @@ impl<'a> ContentBuilder<'a> {
                 s.italic = true;
                 self.walk_children(element, s);
             }
-            "u" => self.walk_children(element, style),
+            "u" => {
+                let mut s = style.clone();
+                s.underline = true;
+                self.walk_children(element, s);
+            }
             "strong" | "b" => {
                 if let Some(floor) = parse_floor_ref(&element) {
                     self.flush_spans();
@@ -161,23 +168,43 @@ impl<'a> ContentBuilder<'a> {
                 s.bold = true;
                 self.walk_children(element, s);
             }
-            "strike" | "s" => self.walk_children(element, style),
+            "strike" | "s" | "del" => {
+                let mut s = style.clone();
+                s.strikethrough = true;
+                self.walk_children(element, s);
+            }
             "font" => {
                 let mut s = style.clone();
                 if let Some(color) = element.value().attr("color") {
                     s.fg = Some(color.trim().to_string());
                 }
+                // font size/face intentionally ignored (terminal controls size).
                 self.walk_children(element, s);
             }
             "br" => self.push_text("\n", &style, None),
             "hr" => self.push_text("\n---\n", &style, None),
             "blockquote" => self.walk_children(element, style),
-            "ol" | "ul" | "li" | "p" | "table" | "tbody" | "tr" | "dl" | "dt" | "dd" => {
-                if tag == "tr" {
-                    self.push_text("\n", &style, None);
-                } else if tag == "td" {
-                    self.push_text(" ", &style, None);
+            "p" => {
+                if element.value().attr("class") == Some("imgtitle") {
+                    return;
                 }
+                self.push_text("\n", &style, None);
+                self.walk_children(element, style.clone());
+                self.push_text("\n", &style, None);
+            }
+            "li" => {
+                self.push_text("\n• ", &style, None);
+                self.walk_children(element, style);
+            }
+            "tr" => {
+                self.walk_children(element, style.clone());
+                self.push_text("\n", &style, None);
+            }
+            "td" | "th" => {
+                self.walk_children(element, style.clone());
+                self.push_text(" ", &style, None);
+            }
+            "ol" | "ul" | "table" | "tbody" | "thead" | "dl" | "dt" | "dd" => {
                 if element.value().attr("class") == Some("imgtitle") {
                     return;
                 }
@@ -317,29 +344,42 @@ fn parse_quote(element: ElementRef<'_>) -> ContentNode {
     let mut author = None;
     let mut time = None;
     let mut reply_to = None;
-    let mut text = element.text().collect::<String>();
 
+    // Prefer blockquote body; fall back to whole quote div text.
+    let mut text = element
+        .select(&Selector::parse("blockquote").unwrap())
+        .next()
+        .map(|b| b.text().collect::<String>())
+        .unwrap_or_else(|| element.text().collect());
+
+    // Older Discuz markup: header in <font>…发表于…</font> (often at end of quote).
     if let Ok(sel) = Selector::parse("font[size=\"2\"], font") {
-        if let Some(header) = element.select(&sel).next() {
-            let header_text = header.text().collect::<String>();
-            if header_text.contains("发表于") {
-                let parts: Vec<_> = header_text.split("发表于").collect();
-                if !parts.is_empty() {
-                    author = Some(parts[0].trim().to_string());
+        for font in element.select(&sel) {
+            let header_text = font.text().collect::<String>();
+            if let Some((a, t)) = parse_pure_quote_meta_line(&header_text) {
+                if author.is_none() {
+                    author = a;
                 }
-                if parts.len() > 1 {
-                    time = Some(parts[1].trim().to_string());
+                if time.is_none() {
+                    time = t;
                 }
+                break;
             }
-            text = element
-                .select(&Selector::parse("blockquote").unwrap())
-                .next()
-                .map(|b| b.text().collect())
-                .unwrap_or(text);
         }
     }
 
-    let cleaned = text.trim().to_string();
+    // Strip meta from body: leading, trailing, or any pure header line.
+    // Modern Discuz often puts `AUTHOR 发表于 TIME` after the quoted text.
+    let (a2, t2, body) = extract_and_strip_quote_meta(&text);
+    if author.is_none() {
+        author = a2;
+    }
+    if time.is_none() {
+        time = t2;
+    }
+    text = body;
+
+    let cleaned = collapse_blank_lines(text.trim());
     if cleaned.starts_with("回复") {
         let rest = cleaned.trim_start_matches("回复").trim();
         if let Some(idx) = rest.find("    ").filter(|&i| i < 10) {
@@ -356,6 +396,264 @@ fn parse_quote(element: ElementRef<'_>) -> ContentNode {
         pid: (!pid.is_empty()).then_some(pid),
         tid: (!tid.is_empty()).then_some(tid),
         reply_to,
+    }
+}
+
+/// Parse a pure meta line: `原帖由 A 于 T 发表` or `A 发表于 T` (datetime only after).
+fn parse_pure_quote_meta_line(header: &str) -> Option<(Option<String>, Option<String>)> {
+    let header = header.trim();
+    if header.is_empty() {
+        return None;
+    }
+    if let Some(rest) = header.strip_prefix("原帖由") {
+        let rest = rest.trim();
+        if let Some((author, after)) = rest.split_once(" 于 ") {
+            let author = author.trim();
+            if let Some((time, tail)) = after.split_once("发表") {
+                let t = time.trim();
+                // Whole-line meta only: nothing meaningful after 发表.
+                if !tail.trim().is_empty() {
+                    return None;
+                }
+                if author.is_empty() && t.is_empty() {
+                    return None;
+                }
+                return Some((
+                    (!author.is_empty()).then(|| author.to_string()),
+                    (!t.is_empty()).then(|| t.to_string()),
+                ));
+            }
+        }
+        return None;
+    }
+    if let Some((author, after)) = header.split_once("发表于") {
+        let author = author.trim();
+        // Usernames are short; long left-hand side is almost certainly body text.
+        if author.is_empty() || author.chars().count() > 30 {
+            return None;
+        }
+        let after = after.trim();
+        let (time, rest) = split_datetime_prefix(after);
+        if time.is_some() && rest.is_empty() {
+            return Some((Some(author.to_string()), time));
+        }
+    }
+    None
+}
+
+/// Extract author/time from leading meta, then drop every pure meta line (incl. trailing).
+fn extract_and_strip_quote_meta(
+    text: &str,
+) -> (Option<String>, Option<String>, String) {
+    let mut author = None;
+    let mut time = None;
+    let mut rest = text.to_string();
+
+    // Leading header (own line, or `原帖由…发表` / `A 发表于 T` glued to body).
+    if let Some((a, t, body)) = split_leading_quote_header(&rest) {
+        author = a;
+        time = t;
+        rest = body;
+    }
+
+    let mut kept = Vec::new();
+    for line in rest.split('\n') {
+        if let Some((a, t)) = parse_pure_quote_meta_line(line) {
+            if author.is_none() {
+                author = a;
+            }
+            if time.is_none() {
+                time = t;
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+
+    (author, time, kept.join("\n"))
+}
+
+/// Split body when a header is present at the start (possibly glued to body on one line).
+fn split_leading_quote_header(
+    text: &str,
+) -> Option<(Option<String>, Option<String>, String)> {
+    let trimmed = text.trim_start();
+    let first_line_end = trimmed.find('\n').unwrap_or(trimmed.len());
+    let first = trimmed[..first_line_end].trim();
+    let rest_after_line = trimmed[first_line_end..].trim_start();
+
+    if let Some((author, time)) = parse_pure_quote_meta_line(first) {
+        return Some((author, time, rest_after_line.to_string()));
+    }
+
+    // Header + body on one line: "原帖由 A 于 T 发表BODY"
+    if let Some(rest) = first.strip_prefix("原帖由") {
+        let rest = rest.trim_start();
+        if let Some((author, after)) = rest.split_once(" 于 ") {
+            if let Some(idx) = after.find("发表") {
+                let time = after[..idx].trim();
+                let mut body = after[idx + "发表".len()..].trim_start().to_string();
+                if !rest_after_line.is_empty() {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    body.push_str(rest_after_line);
+                }
+                let author = author.trim();
+                return Some((
+                    (!author.is_empty()).then(|| author.to_string()),
+                    (!time.is_empty()).then(|| time.to_string()),
+                    body,
+                ));
+            }
+        }
+    }
+    // "A 发表于 T BODY" on one line
+    if let Some((author, after)) = first.split_once("发表于") {
+        let author = author.trim();
+        if !author.is_empty() && author.chars().count() <= 30 {
+            let after = after.trim_start();
+            let (time, body_inline) = split_datetime_prefix(after);
+            if time.is_some() {
+                let mut body = body_inline.trim_start().to_string();
+                if !rest_after_line.is_empty() {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    body.push_str(rest_after_line);
+                }
+                return Some((Some(author.to_string()), time, body));
+            }
+        }
+    }
+    None
+}
+
+/// Pull a Discuz-like datetime prefix (`2026-7-9 09:42`) off the start of `s`.
+fn split_datetime_prefix(s: &str) -> (Option<String>, &str) {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    // date: digits-digits-digits
+    let mut seps = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            i += 1;
+        } else if b == b'-' && seps < 2 {
+            seps += 1;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if seps != 2 || i == 0 {
+        return (None, s);
+    }
+    let mut end = i;
+    if bytes.get(i) == Some(&b' ') {
+        let mut j = i + 1;
+        let mut colons = 0u8;
+        let mut digits = 0u8;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if b.is_ascii_digit() {
+                digits += 1;
+                j += 1;
+            } else if b == b':' && colons < 2 {
+                colons += 1;
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if digits >= 3 && colons >= 1 {
+            end = j;
+        }
+    }
+    let time = s[..end].trim();
+    if time.is_empty() {
+        (None, s)
+    } else {
+        (Some(time.to_string()), s[end..].trim_start())
+    }
+}
+
+/// Normalize HTML text nodes: keep intentional inter-tag spaces, drop pretty-print newlines.
+fn normalize_html_text(raw: &str) -> Option<String> {
+    let t = raw.replace(['<', '>'], " ").replace('\u{a0}', " ");
+    if t.is_empty() {
+        return None;
+    }
+    if t.chars().all(|c| c.is_whitespace()) {
+        // Horizontal spacing only (e.g. &nbsp; between <font> runs) → one space.
+        // Vertical / indent whitespace from pretty-printed HTML → drop.
+        if t.chars().any(|c| c == ' ') && !t.contains('\n') && !t.contains('\r') {
+            return Some(" ".into());
+        }
+        return None;
+    }
+    Some(t)
+}
+
+/// Collapse consecutive blank lines to a single blank line; strip trailing blanks.
+fn collapse_blank_lines(s: &str) -> String {
+    let s = s.replace('\u{a0}', " ");
+    let mut lines = Vec::new();
+    let mut last_blank = false;
+    for line in s.split('\n') {
+        let is_blank = line.trim().is_empty();
+        if is_blank {
+            if !last_blank && !lines.is_empty() {
+                lines.push(String::new());
+            }
+            last_blank = true;
+        } else {
+            lines.push(line.to_string());
+            last_blank = false;
+        }
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn normalize_node_text(node: &mut ContentNode) {
+    match node {
+        ContentNode::Text { spans } => {
+            for span in spans.iter_mut() {
+                if let ContentSpan::Text { text, .. } = span {
+                    *text = collapse_blank_lines(text);
+                }
+            }
+        }
+        ContentNode::Quote { text, .. } => {
+            *text = collapse_blank_lines(text);
+        }
+        _ => {}
+    }
+}
+
+fn trim_trailing_empty_nodes(nodes: &mut Vec<ContentNode>) {
+    while let Some(last) = nodes.last() {
+        let empty = match last {
+            ContentNode::Text { spans } => spans.iter().all(|span| match span {
+                ContentSpan::Text { text, .. } => text.trim().is_empty(),
+                ContentSpan::Smiley { .. } => false,
+            }),
+            _ => false,
+        };
+        if empty {
+            nodes.pop();
+        } else {
+            break;
+        }
+    }
+    // Also trim trailing newlines on the final text node.
+    if let Some(ContentNode::Text { spans }) = nodes.last_mut() {
+        if let Some(ContentSpan::Text { text, .. }) = spans.last_mut() {
+            *text = text.trim_end_matches(['\n', '\r', ' ']).to_string();
+        }
     }
 }
 
@@ -547,6 +845,163 @@ mod tests {
             parse_smilie_code("https://img02.4d4y.com/forum/images/smilies/default/biggrin.gif"),
             Some("default_biggrin".into())
         );
+    }
+
+    #[test]
+    fn quote_yuanti_header_stripped_from_body() {
+        let html = Html::parse_document(
+            r#"<div class="t_msgfont"><div class="quote"><blockquote>原帖由 <i>金牙</i> 于 2008-11-29 19:27 发表<br />
+中文手写还不错 </blockquote></div>回复正文</div>"#,
+        );
+        let root = html
+            .select(&Selector::parse("div.t_msgfont").unwrap())
+            .next()
+            .expect("root");
+        let nodes = parse_content(root, &ForumUrls::default_4d4y());
+        let quote = nodes
+            .iter()
+            .find_map(|n| match n {
+                ContentNode::Quote {
+                    author,
+                    time,
+                    text,
+                    ..
+                } => Some((author.clone(), time.clone(), text.clone())),
+                _ => None,
+            })
+            .expect("quote node");
+        assert_eq!(quote.0.as_deref(), Some("金牙"));
+        assert_eq!(quote.1.as_deref(), Some("2008-11-29 19:27"));
+        assert!(!quote.2.contains("原帖由"));
+        assert!(!quote.2.contains("发表"));
+        assert!(quote.2.contains("中文手写还不错"));
+    }
+
+    #[test]
+    fn quote_pub_at_header_stripped() {
+        let html = Html::parse_document(
+            r#"<div class="t_msgfont"><div class="quote"><blockquote>puhongyi 发表于 2026-7-9 09:42
+hello world</blockquote></div></div>"#,
+        );
+        let root = html
+            .select(&Selector::parse("div.t_msgfont").unwrap())
+            .next()
+            .expect("root");
+        let nodes = parse_content(root, &ForumUrls::default_4d4y());
+        let quote = nodes
+            .iter()
+            .find_map(|n| match n {
+                ContentNode::Quote {
+                    author,
+                    time,
+                    text,
+                    ..
+                } => Some((author.clone(), time.clone(), text.clone())),
+                _ => None,
+            })
+            .expect("quote");
+        assert_eq!(quote.0.as_deref(), Some("puhongyi"));
+        assert_eq!(quote.1.as_deref(), Some("2026-7-9 09:42"));
+        assert_eq!(quote.2, "hello world");
+    }
+
+    #[test]
+    fn quote_trailing_pub_at_line_stripped() {
+        // Modern Discuz: body first, then `AUTHOR 发表于 TIME` (often in <font>).
+        let html = Html::parse_document(
+            r#"<div class="t_msgfont"><div class="quote"><blockquote>有一年工会发纪念品 新秀丽的双肩包<br />
+<br />
+<font size="2">taicaile 发表于 2026-7-3 10:58</font></blockquote></div>让我看看京东</div>"#,
+        );
+        let root = html
+            .select(&Selector::parse("div.t_msgfont").unwrap())
+            .next()
+            .expect("root");
+        let nodes = parse_content(root, &ForumUrls::default_4d4y());
+        let quote = nodes
+            .iter()
+            .find_map(|n| match n {
+                ContentNode::Quote {
+                    author,
+                    time,
+                    text,
+                    ..
+                } => Some((author.clone(), time.clone(), text.clone())),
+                _ => None,
+            })
+            .expect("quote");
+        assert_eq!(quote.0.as_deref(), Some("taicaile"));
+        assert_eq!(quote.1.as_deref(), Some("2026-7-3 10:58"));
+        assert!(
+            quote.2.contains("有一年工会发纪念品"),
+            "body missing content: {}",
+            quote.2
+        );
+        assert!(
+            !quote.2.contains("发表于") && !quote.2.contains("taicaile"),
+            "trailing meta still in body: {}",
+            quote.2
+        );
+    }
+
+    #[test]
+    fn nbsp_between_fonts_keeps_space() {
+        let html = Html::parse_document(
+            r#"<div class="t_msgfont"><font>感受</font><font>&nbsp;&nbsp;</font><font>文中</font></div>"#,
+        );
+        let root = html
+            .select(&Selector::parse("div.t_msgfont").unwrap())
+            .next()
+            .expect("root");
+        let nodes = parse_content(root, &ForumUrls::default_4d4y());
+        let text = nodes
+            .iter()
+            .find_map(|n| match n {
+                ContentNode::Text { spans } => {
+                    let mut s = String::new();
+                    for span in spans {
+                        if let ContentSpan::Text { text, .. } = span {
+                            s.push_str(text);
+                        }
+                    }
+                    Some(s)
+                }
+                _ => None,
+            })
+            .expect("text");
+        assert!(text.contains("感受 文中") || text.contains("感受  文中"), "got {text:?}");
+    }
+
+    #[test]
+    fn underline_and_strike_styles() {
+        let html = Html::parse_document(
+            r#"<div class="t_msgfont"><u>under</u><strike>out</strike></div>"#,
+        );
+        let root = html
+            .select(&Selector::parse("div.t_msgfont").unwrap())
+            .next()
+            .expect("root");
+        let nodes = parse_content(root, &ForumUrls::default_4d4y());
+        let spans = match &nodes[0] {
+            ContentNode::Text { spans } => spans,
+            _ => panic!("expected text"),
+        };
+        assert!(spans.iter().any(|s| matches!(
+            s,
+            ContentSpan::Text {
+                text,
+                style,
+                ..
+            } if text.contains("under") && style.underline
+        )));
+        assert!(spans.iter().any(|s| matches!(
+            s,
+            ContentSpan::Text {
+                text,
+                style,
+                ..
+            } if text.contains("out") && style.strikethrough
+        )));
     }
 
     #[test]

@@ -42,11 +42,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
 
-    if area.width < 80 || area.height < 24 {
-        frame.render_widget(
-            Paragraph::new("终端窗口过小，建议至少 80×24").style(app.palette().warn_style()),
-            area,
-        );
+    // Zero-area terminals: nothing to paint. Sub-shells also guard width/height == 0.
+    if area.width == 0 || area.height == 0 {
         return;
     }
 

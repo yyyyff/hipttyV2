@@ -1,10 +1,9 @@
-use hiptty_core::{AdapterError, Poll, PollOption, Post, ThreadDetail};
+use hiptty_core::{AdapterError, ContentNode, ContentSpan, Poll, PollOption, Post, ThreadDetail};
 use scraper::{ElementRef, Html, Selector};
 
 use crate::http::urls::ForumUrls;
 use crate::parser::common::{extract_param, parse_int, parse_size_text};
 use crate::parser::content::{parse_block_image, parse_content};
-use hiptty_core::ContentNode;
 
 pub fn parse(html: &str, tid: &str, urls: &ForumUrls) -> Result<ThreadDetail, AdapterError> {
     let document = Html::parse_document(html);
@@ -196,7 +195,7 @@ fn parse_post(
                 .unwrap(),
         )
         .next()
-        .map(|el| el.text().collect::<String>())?;
+        .map(|el| normalize_post_time(&el.text().collect::<String>()))?;
 
     let floor = post_el
         .select(&Selector::parse("td.postcontent div.postinfo strong a em").unwrap())
@@ -236,8 +235,15 @@ fn parse_post(
         poll = thread_poll.cloned();
     }
 
+    let mut edited_by = None;
+    let mut edited_at = None;
+
     if let Some(content_el) = post_el.select(&content_sel).next() {
         content = parse_content(content_el, urls);
+        if let Some((by, at)) = extract_and_strip_edit_notice(&mut content) {
+            edited_by = Some(by);
+            edited_at = Some(at);
+        }
         append_attachments(post_el, urls, &mut content);
     } else if let Some(locked) = post_el
         .select(
@@ -250,8 +256,7 @@ fn parse_post(
                 text: locked.text().collect(),
                 style: hiptty_core::Style {
                     fg: Some("gray".into()),
-                    bold: false,
-                    italic: false,
+                    ..Default::default()
                 },
                 url: None,
             }],
@@ -270,8 +275,7 @@ fn parse_post(
                 text: "[[无法解析帖子内容]]".into(),
                 style: hiptty_core::Style {
                     fg: Some("gray".into()),
-                    bold: false,
-                    italic: false,
+                    ..Default::default()
                 },
                 url: None,
             }],
@@ -306,7 +310,323 @@ fn parse_post(
         page,
         warned,
         signature,
+        edited_by,
+        edited_at,
     })
+}
+
+/// Discuz `<em>发表于 2026-6-7 13:13</em>` → bare datetime for clients.
+fn normalize_post_time(raw: &str) -> String {
+    let t = raw.trim();
+    t.strip_prefix("发表于")
+        .map(str::trim)
+        .unwrap_or(t)
+        .to_string()
+}
+
+/// Pull Discuz `本帖最后由 AUTHOR 于 TIME 编辑` out of body into structured fields.
+///
+/// Appears as prefix (glued to body) or suffix (`[<i>…</i>]` at end of post).
+fn extract_and_strip_edit_notice(content: &mut Vec<ContentNode>) -> Option<(String, String)> {
+    // Prefer first text node (prefix glued to content), then last (classic suffix).
+    let indices: Vec<usize> = content
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| matches!(n, ContentNode::Text { .. }).then_some(i))
+        .collect();
+    if indices.is_empty() {
+        return None;
+    }
+
+    let try_order = {
+        let mut v = Vec::new();
+        if let Some(&first) = indices.first() {
+            v.push(first);
+        }
+        if let Some(&last) = indices.last() {
+            if Some(last) != indices.first().copied() {
+                v.push(last);
+            }
+        }
+        v
+    };
+
+    for idx in try_order {
+        let ContentNode::Text { spans } = &mut content[idx] else {
+            continue;
+        };
+        if let Some((by, at, new_spans)) = strip_edit_notice_from_spans(spans) {
+            if new_spans.is_empty()
+                || new_spans.iter().all(|s| match s {
+                    ContentSpan::Text { text, .. } => text.trim().is_empty(),
+                    ContentSpan::Smiley { .. } => false,
+                })
+            {
+                content.remove(idx);
+            } else {
+                *spans = new_spans;
+            }
+            return Some((by, at));
+        }
+    }
+    None
+}
+
+fn strip_edit_notice_from_spans(
+    spans: &[ContentSpan],
+) -> Option<(String, String, Vec<ContentSpan>)> {
+    // Never flatten Smiley spans away. Edit notices sit in text runs; smileys (often
+    // right after a prefix notice) must remain ContentSpan::Smiley.
+    if let Some(result) = strip_edit_in_leading_text_run(spans) {
+        return Some(result);
+    }
+    if let Some(result) = strip_edit_in_trailing_text_run(spans) {
+        return Some(result);
+    }
+    // Text-only node (classic `[本帖最后由…]` suffix with no smileys).
+    if spans
+        .iter()
+        .all(|s| matches!(s, ContentSpan::Text { .. }))
+    {
+        let mut flat = String::new();
+        for span in spans {
+            if let ContentSpan::Text { text, .. } = span {
+                flat.push_str(text);
+            }
+        }
+        let (by, at, before, after) = split_edit_notice(&flat)?;
+        let style = spans
+            .iter()
+            .find_map(|s| match s {
+                ContentSpan::Text { style, .. } => Some(style.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let text = join_before_after(&before, &after);
+        let new_spans = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentSpan::Text {
+                text,
+                style,
+                url: None,
+            }]
+        };
+        return Some((by, at, new_spans));
+    }
+    None
+}
+
+/// Prefix case: `本帖最后由…编辑` then smileys/body in the same Text node.
+fn strip_edit_in_leading_text_run(
+    spans: &[ContentSpan],
+) -> Option<(String, String, Vec<ContentSpan>)> {
+    let mut lead_end = 0usize;
+    let mut lead_flat = String::new();
+    for (i, span) in spans.iter().enumerate() {
+        match span {
+            ContentSpan::Text { text, .. } => {
+                lead_flat.push_str(text);
+                lead_end = i + 1;
+            }
+            ContentSpan::Smiley { .. } => break,
+        }
+    }
+    if lead_end == 0 {
+        return None;
+    }
+    let (by, at, before, after) = split_edit_notice(&lead_flat)?;
+    // Only treat as a leading-run hit when the notice is not purely a trailing
+    // bracketed footer of a longer text-only node handled elsewhere — always OK.
+    let style = spans[..lead_end]
+        .iter()
+        .find_map(|s| match s {
+            ContentSpan::Text { style, .. } => Some(style.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let text = join_before_after(&before, &after);
+    let mut new_spans = Vec::new();
+    if !text.is_empty() {
+        new_spans.push(ContentSpan::Text {
+            text,
+            style,
+            url: None,
+        });
+    }
+    new_spans.extend(spans[lead_end..].iter().cloned());
+    Some((by, at, new_spans))
+}
+
+/// Suffix case: body/smileys then trailing text `本帖最后由…编辑`.
+fn strip_edit_in_trailing_text_run(
+    spans: &[ContentSpan],
+) -> Option<(String, String, Vec<ContentSpan>)> {
+    if spans.is_empty() {
+        return None;
+    }
+    let mut trail_start = spans.len();
+    let mut trail_flat = String::new();
+    for i in (0..spans.len()).rev() {
+        match &spans[i] {
+            ContentSpan::Text { text, .. } => {
+                trail_flat = format!("{text}{trail_flat}");
+                trail_start = i;
+            }
+            ContentSpan::Smiley { .. } => break,
+        }
+    }
+    if trail_start >= spans.len() {
+        return None;
+    }
+    // Avoid double-applying the same leading run.
+    if trail_start == 0 {
+        return None;
+    }
+    let (by, at, before, after) = split_edit_notice(&trail_flat)?;
+    let style = spans[trail_start..]
+        .iter()
+        .find_map(|s| match s {
+            ContentSpan::Text { style, .. } => Some(style.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let text = join_before_after(&before, &after);
+    let mut new_spans = spans[..trail_start].to_vec();
+    if !text.is_empty() {
+        new_spans.push(ContentSpan::Text {
+            text,
+            style,
+            url: None,
+        });
+    }
+    Some((by, at, new_spans))
+}
+
+fn join_before_after(before: &str, after: &str) -> String {
+    let mut text = String::new();
+    if !before.is_empty() {
+        text.push_str(before);
+    }
+    if !before.is_empty()
+        && !after.is_empty()
+        && !before.ends_with('\n')
+        && !after.starts_with('\n')
+    {
+        text.push('\n');
+    }
+    text.push_str(after);
+    text.trim().to_string()
+}
+
+/// Split `…[ 本帖最后由 A 于 T 编辑 ]…` → (author, time, before, after).
+fn split_edit_notice(s: &str) -> Option<(String, String, String, String)> {
+    const MARK: &str = "本帖最后由";
+    let idx = s.find(MARK)?;
+    let after_mark = s[idx + MARK.len()..].trim_start();
+    let (author, rest) = after_mark.split_once(" 于 ")?;
+    let author = author.trim();
+    if author.is_empty() || author.chars().count() > 30 {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (time, rest) = rest.split_once("编辑")?;
+    let time = time.trim();
+    if time.is_empty() {
+        return None;
+    }
+    let mut before = s[..idx].to_string();
+    let mut after = rest.to_string();
+    // Optional surrounding brackets Discuz wraps the notice with.
+    before = before
+        .trim_end_matches(|c: char| c == '[' || c.is_whitespace())
+        .to_string();
+    after = after
+        .trim_start_matches(|c: char| c == ']' || c.is_whitespace())
+        .to_string();
+    Some((author.to_string(), time.to_string(), before, after))
+}
+
+#[cfg(test)]
+mod edit_notice_tests {
+    use super::*;
+
+    #[test]
+    fn split_prefix_edit_glued_to_body() {
+        let s = "本帖最后由 yalelynn 于 2026-6-20 16:18 编辑 ATTACHIMG-1 就看你了";
+        let (by, at, before, after) = split_edit_notice(s).expect("parse");
+        assert_eq!(by, "yalelynn");
+        assert_eq!(at, "2026-6-20 16:18");
+        assert!(before.is_empty());
+        assert!(after.contains("ATTACHIMG"));
+        assert!(after.contains("就看你了"));
+    }
+
+    #[test]
+    fn split_bracketed_suffix_edit() {
+        let s = "正文内容\n\n[ 本帖最后由 fbscell 于 2009-3-15 19:23 编辑 ]";
+        let (by, at, before, after) = split_edit_notice(s).expect("parse");
+        assert_eq!(by, "fbscell");
+        assert_eq!(at, "2009-3-15 19:23");
+        assert!(before.contains("正文内容"));
+        assert!(after.trim().is_empty());
+    }
+
+    #[test]
+    fn normalize_time_strips_published_label() {
+        assert_eq!(normalize_post_time("发表于 2026-6-7 13:13"), "2026-6-7 13:13");
+        assert_eq!(normalize_post_time("2026-6-7 13:13"), "2026-6-7 13:13");
+    }
+
+    #[test]
+    fn strip_edit_keeps_trailing_smileys() {
+        let spans = vec![
+            ContentSpan::Text {
+                text: "本帖最后由 yalelynn 于 2026-6-16 21:24 编辑 ".into(),
+                style: Default::default(),
+                url: None,
+            },
+            ContentSpan::Smiley {
+                url: "https://img02.4d4y.com/forum/images/smilies/default/lol.gif".into(),
+                code: Some("default_lol".into()),
+                smilie_id: Some("9".into()),
+            },
+            ContentSpan::Smiley {
+                url: "https://img02.4d4y.com/forum/images/smilies/default/smile.gif".into(),
+                code: Some("default_smile".into()),
+                smilie_id: Some("1".into()),
+            },
+            ContentSpan::Text {
+                text: " - DBer".into(),
+                style: Default::default(),
+                url: None,
+            },
+        ];
+        let (by, at, out) = strip_edit_notice_from_spans(&spans).expect("strip");
+        assert_eq!(by, "yalelynn");
+        assert_eq!(at, "2026-6-16 21:24");
+        assert_eq!(
+            out.iter()
+                .filter(|s| matches!(s, ContentSpan::Smiley { .. }))
+                .count(),
+            2,
+            "smileys must survive edit-notice strip: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|s| matches!(
+                s,
+                ContentSpan::Text { text, .. } if text.contains("本帖最后由")
+            )),
+            "edit notice still present: {out:?}"
+        );
+        assert!(
+            out.iter().any(|s| matches!(
+                s,
+                ContentSpan::Text { text, .. } if text.contains("DBer")
+            )),
+            "body tail lost: {out:?}"
+        );
+    }
 }
 
 fn append_attachments(
@@ -388,6 +708,54 @@ mod tests {
             .content
             .iter()
             .any(|n| matches!(n, hiptty_core::ContentNode::Quote { .. }))));
+        // Quote chrome owns author/time; body must not re-print the Discuz header line.
+        for post in &detail.posts {
+            for node in &post.content {
+                if let hiptty_core::ContentNode::Quote {
+                    author,
+                    time,
+                    text,
+                    ..
+                } = node
+                {
+                    assert!(author.is_some(), "quote author on floor {}", post.floor);
+                    assert!(time.is_some(), "quote time on floor {}", post.floor);
+                    assert!(
+                        !text.contains("原帖由") && !text.contains("发表于"),
+                        "quote body still has header on floor {}: {text}",
+                        post.floor
+                    );
+                }
+            }
+        }
+        // Publish time is bare datetime (no duplicated 发表于 prefix).
+        assert!(
+            !detail.posts[0].time.contains("发表于"),
+            "time still has 发表于: {}",
+            detail.posts[0].time
+        );
+        // Edit notice is structured, not left in body.
+        let with_edit = detail
+            .posts
+            .iter()
+            .find(|p| p.edited_by.is_some())
+            .expect("fixture has edited posts");
+        assert!(with_edit.edited_at.is_some());
+        for post in &detail.posts {
+            for node in &post.content {
+                if let hiptty_core::ContentNode::Text { spans } = node {
+                    for span in spans {
+                        if let hiptty_core::ContentSpan::Text { text, .. } = span {
+                            assert!(
+                                !text.contains("本帖最后由"),
+                                "edit notice still in body floor {}: {text}",
+                                post.floor
+                            );
+                        }
+                    }
+                }
+            }
+        }
         assert!(detail.posts.iter().any(|p| {
             p.content.iter().any(|n| {
                 matches!(

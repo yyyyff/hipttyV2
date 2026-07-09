@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::modal::{begin_modal, draw_menu_item};
 
+const POPUP_WIDTH: u16 = 36;
 const POPUP_HEIGHT: u16 = 22;
 
 pub struct ForumPickerProps<'a> {
@@ -43,7 +44,7 @@ pub fn forum_picker_entries(current_fid: u32, default_forums: &[u32; 3]) -> Vec<
 }
 
 pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerProps<'_>) -> ForumPickerFrame {
-    let popup_width = area.width.min(50);
+    let popup_width = area.width.min(POPUP_WIDTH);
     let popup_height = area.height.min(POPUP_HEIGHT);
     let modal = begin_modal(
         frame,

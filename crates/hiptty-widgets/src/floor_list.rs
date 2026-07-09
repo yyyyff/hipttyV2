@@ -1,11 +1,11 @@
 use hiptty_core::Post;
 use hiptty_image::{
     draw_graphic_in_viewport, graphics_bottom_margin, layout_post_blocks, ContentBlock, ImageCache,
-    ImageKind, ImageState, AVATAR_COLS, IMAGE_FAIL_LABEL,
+    ImageKind, ImageState, InlinePart, AVATAR_COLS, IMAGE_FAIL_LABEL,
 };
 use hiptty_render::{
-    clear_content_viewport, floor_header_rows, format_signature, mask_line_cjk, maybe_mask_cjk,
-    render_post_content_lines, str_width, Palette,
+    clear_content_viewport, floor_header_rows_with_edit, format_signature, mask_line_cjk,
+    maybe_mask_cjk, render_post_content_lines, str_width, Palette,
 };
 use ratatui::{
     layout::{Alignment, Rect},
@@ -597,10 +597,12 @@ fn draw_floor(
         .saturating_sub(if show_avatar { AVATAR_W } else { 0 });
 
     let author = maybe_mask_cjk(&post.author, mask_cjk);
-    let (mut row1, row2) = floor_header_rows(
+    let (mut row1, row2) = floor_header_rows_with_edit(
         author.as_ref(),
         post.floor,
         &post.time,
+        post.edited_by.as_deref(),
+        post.edited_at.as_deref(),
         text_w as usize,
         palette,
     );
@@ -795,6 +797,7 @@ fn draw_floor(
                     *width,
                     *height,
                     *failed,
+                    body.x.saturating_add(1),
                 ) {
                     break 'content;
                 }
@@ -823,6 +826,27 @@ fn draw_floor(
                     *width,
                     *height,
                     *failed,
+                    body.x.saturating_add(1),
+                ) {
+                    break 'content;
+                }
+            }
+            ContentBlock::Inline { parts } => {
+                if render_inline_row(
+                    frame,
+                    viewport,
+                    area,
+                    body,
+                    images,
+                    palette,
+                    selected,
+                    mask_cjk,
+                    &mut y,
+                    &mut line_idx,
+                    scroll_top,
+                    floor_top,
+                    skip_lines,
+                    parts,
                 ) {
                     break 'content;
                 }
@@ -850,7 +874,7 @@ fn render_image_block(
     frame: &mut Frame<'_>,
     viewport: Rect,
     area: Rect,
-    body: Rect,
+    _body: Rect,
     images: &mut Option<&mut ImageCache>,
     palette: Palette,
     selected: bool,
@@ -864,6 +888,7 @@ fn render_image_block(
     _width: u16,
     height: u16,
     failed: bool,
+    doc_x: u16,
 ) -> bool {
     let block_start = *line_idx;
     let doc_y = i32::from(floor_top.saturating_add(block_start));
@@ -910,10 +935,119 @@ fn render_image_block(
                 kind,
                 palette,
                 fail_label,
-                body.x.saturating_add(1),
+                doc_x,
                 doc_y,
                 scroll_top,
             );
+        }
+        *y = y.saturating_add(rows_in_view);
+    }
+    *line_idx = block_start.saturating_add(height);
+    *y >= area.y.saturating_add(area.height)
+}
+
+/// Draw one mixed text+smiley row. Returns true if the content viewport is full.
+#[allow(clippy::too_many_arguments)]
+fn render_inline_row(
+    frame: &mut Frame<'_>,
+    viewport: Rect,
+    area: Rect,
+    body: Rect,
+    images: &mut Option<&mut ImageCache>,
+    palette: Palette,
+    selected: bool,
+    mask_cjk: bool,
+    y: &mut u16,
+    line_idx: &mut u16,
+    scroll_top: u16,
+    floor_top: u16,
+    skip_lines: u16,
+    parts: &[InlinePart],
+) -> bool {
+    let height = parts
+        .iter()
+        .map(|p| match p {
+            InlinePart::Text(_) => 1u16,
+            InlinePart::Smiley { height, .. } => *height,
+        })
+        .max()
+        .unwrap_or(1);
+    let block_start = *line_idx;
+    let doc_y = i32::from(floor_top.saturating_add(block_start));
+
+    while *line_idx < block_start.saturating_add(height) && *line_idx < skip_lines {
+        *line_idx += 1;
+    }
+    if *line_idx >= block_start.saturating_add(height) {
+        return false;
+    }
+    if *y >= area.y + area.height {
+        return true;
+    }
+
+    let remaining_h = area.y.saturating_add(area.height).saturating_sub(*y);
+    if remaining_h > 0 && *line_idx >= skip_lines {
+        let slice_skip = line_idx.saturating_sub(block_start);
+        let rows_in_view = height.saturating_sub(slice_skip).min(remaining_h);
+        for row in 0..rows_in_view {
+            draw_nav_bar(frame, area.x, *y + row, selected, palette);
+        }
+
+        // Only the first visible slice of multi-row smileys draws content; height is 1 today.
+        if slice_skip == 0 {
+            let row_y = *y;
+            let mut x = body.x.saturating_add(1);
+            for part in parts {
+                match part {
+                    InlinePart::Text(line) => {
+                        let painted = mask_line_cjk(line.clone(), mask_cjk);
+                        let w = painted
+                            .spans
+                            .iter()
+                            .map(|s| str_width(s.content.as_ref()) as u16)
+                            .sum::<u16>()
+                            .max(1)
+                            .min(body.x.saturating_add(body.width).saturating_sub(x));
+                        if w == 0 {
+                            continue;
+                        }
+                        frame.render_widget(
+                            Paragraph::new(painted),
+                            Rect {
+                                x,
+                                y: row_y,
+                                width: w,
+                                height: 1,
+                            },
+                        );
+                        x = x.saturating_add(w);
+                    }
+                    InlinePart::Smiley {
+                        key,
+                        width,
+                        failed,
+                        ..
+                    } => {
+                        let fail_label = if *failed { IMAGE_FAIL_LABEL } else { "…" };
+                        if let Some(cache) = images.as_deref() {
+                            let entry = cache.get(key);
+                            draw_graphic_in_viewport(
+                                frame,
+                                viewport,
+                                entry,
+                                cache.picker(),
+                                ImageKind::Smiley,
+                                palette,
+                                fail_label,
+                                x,
+                                doc_y,
+                                scroll_top,
+                            );
+                        }
+                        x = x.saturating_add(*width);
+                    }
+                }
+            }
         }
         *y = y.saturating_add(rows_in_view);
     }
@@ -1012,6 +1146,8 @@ mod tests {
             page: 1,
             warned: false,
             signature: Some("sign".into()),
+            edited_by: None,
+            edited_at: None,
         }
     }
 

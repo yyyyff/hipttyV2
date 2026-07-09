@@ -4,7 +4,7 @@ use ratatui::{
     text::Line,
 };
 
-use crate::text::{format_relative_time, str_width, truncate_str};
+use crate::text::{str_width, strip_published_prefix, truncate_str};
 use crate::theme::{parse_hex_color, Palette};
 use crate::wrap::{wrap_plain, wrap_segments, StyledSegment};
 
@@ -43,10 +43,10 @@ pub fn render_content_node(
         ContentNode::Text { spans } => render_text_spans(spans, max_cols, palette),
         ContentNode::Quote {
             author,
-            time: _,
+            time,
             text,
             ..
-        } => render_quote(author.as_deref(), text, max_cols, palette),
+        } => render_quote(author.as_deref(), time.as_deref(), text, max_cols, palette),
         ContentNode::Image { .. } => vec![Line::styled(IMAGE_PLACEHOLDER, palette.muted_style())],
         ContentNode::Attachment { name, size, .. } => {
             let size_text = format_attachment_size(*size);
@@ -104,6 +104,7 @@ fn render_text_spans(
 
 fn render_quote(
     author: Option<&str>,
+    time: Option<&str>,
     text: &str,
     max_cols: usize,
     palette: Palette,
@@ -114,10 +115,7 @@ fn render_quote(
         return Vec::new();
     }
 
-    let header = match author {
-        Some(a) => format!("@{} 说:", a),
-        None => "@? 说:".to_string(),
-    };
+    let header = quote_header_label(author, time);
     let mut lines = Vec::new();
     lines.extend(wrap_plain(
         &header,
@@ -130,6 +128,16 @@ fn render_quote(
         .into_iter()
         .map(|line| prefix_quote_line(line, palette))
         .collect()
+}
+
+/// Quote chrome label: `@author in time`, `@author`, or `@?`.
+pub fn quote_header_label(author: Option<&str>, time: Option<&str>) -> String {
+    match (author.map(str::trim).filter(|s| !s.is_empty()), time.map(str::trim).filter(|s| !s.is_empty())) {
+        (Some(a), Some(t)) => format!("@{a} in {t}"),
+        (Some(a), None) => format!("@{a}"),
+        (None, Some(t)) => format!("@? in {t}"),
+        (None, None) => "@?".to_string(),
+    }
 }
 
 fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
@@ -152,6 +160,12 @@ fn core_style_to_ratatui(style: &CoreStyle, palette: Palette) -> Style {
     }
     if style.italic {
         out = out.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        out = out.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.strikethrough {
+        out = out.add_modifier(Modifier::CROSSED_OUT);
     }
     out
 }
@@ -195,6 +209,23 @@ pub fn floor_header_rows(
     width: usize,
     palette: Palette,
 ) -> (Line<'static>, Line<'static>) {
+    floor_header_rows_with_edit(author, floor, time_raw, None, None, width, palette)
+}
+
+/// Floor header: author / #N on row1; publish (+ optional edit) on row2.
+///
+/// Edit notice is shown under the username chrome instead of in post body:
+/// - same editor as author → `发表于 … · 编辑于 …`
+/// - other editor (mod/admin) → `发表于 … · 由X编辑于 …`
+pub fn floor_header_rows_with_edit(
+    author: &str,
+    floor: u32,
+    time_raw: &str,
+    edited_by: Option<&str>,
+    edited_at: Option<&str>,
+    width: usize,
+    palette: Palette,
+) -> (Line<'static>, Line<'static>) {
     let floor_tag = format!("#{floor}");
     let floor_w = str_width(&floor_tag);
     let author_budget = width.saturating_sub(floor_w + 1);
@@ -215,15 +246,49 @@ pub fn floor_header_rows(
         palette.secondary_style().add_modifier(Modifier::BOLD),
     ));
 
-    let time = format_relative_time(time_raw);
-    let time_label = if time.is_empty() {
-        String::new()
-    } else {
-        format!("发表于 {time}")
-    };
+    let time_label = floor_meta_label(author, time_raw, edited_by, edited_at, width);
     let row2 = Line::styled(time_label, palette.secondary_style());
 
     (Line::from(row1_spans), row2)
+}
+
+fn floor_meta_label(
+    author: &str,
+    time_raw: &str,
+    edited_by: Option<&str>,
+    edited_at: Option<&str>,
+    max_width: usize,
+) -> String {
+    // Detail chrome uses forum wall-clock times as-is (no relative rewriting).
+    let posted = strip_published_prefix(time_raw).to_string();
+    let mut label = if posted.is_empty() {
+        String::new()
+    } else {
+        format!("发表于 {posted}")
+    };
+
+    if let (Some(editor), Some(at)) = (edited_by, edited_at) {
+        let editor = editor.trim();
+        let edited = strip_published_prefix(at).to_string();
+        if !editor.is_empty() && !edited.is_empty() {
+            let edit_part = if editor == author {
+                format!("编辑于 {edited}")
+            } else {
+                format!("由{editor}编辑于 {edited}")
+            };
+            if label.is_empty() {
+                label = edit_part;
+            } else {
+                label = format!("{label} · {edit_part}");
+            }
+        }
+    }
+
+    if max_width > 0 && str_width(&label) > max_width {
+        truncate_str(&label, max_width)
+    } else {
+        label
+    }
 }
 
 pub fn signature_line(signature: &str, width: usize, palette: Palette) -> Line<'static> {
@@ -254,5 +319,52 @@ mod tests {
     fn signature_truncated() {
         let sig = format_signature("这是一段很长很长很长很长很长很长的签名文字", 20);
         assert!(str_width(&sig) <= 20);
+    }
+
+    #[test]
+    fn floor_meta_no_double_published_prefix() {
+        let (_r1, r2) = floor_header_rows("bob", 1, "发表于 2026-6-7 13:13", 40, Palette::default());
+        let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.matches("发表于").count(), 1, "got {text}");
+        assert!(text.contains("2026-6-7 13:13"), "forum time kept: {text}");
+        assert!(!text.contains("前"), "must not rewrite to relative: {text}");
+    }
+
+    #[test]
+    fn floor_meta_merges_self_edit() {
+        let (_r1, r2) = floor_header_rows_with_edit(
+            "yalelynn",
+            1,
+            "2026-6-7 13:13",
+            Some("yalelynn"),
+            Some("2026-6-16 21:24"),
+            80,
+            Palette::default(),
+        );
+        let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            text,
+            "发表于 2026-6-7 13:13 · 编辑于 2026-6-16 21:24",
+            "got {text}"
+        );
+    }
+
+    #[test]
+    fn floor_meta_names_other_editor() {
+        let (_r1, r2) = floor_header_rows_with_edit(
+            "alice",
+            2,
+            "2026-6-7 13:13",
+            Some("mod"),
+            Some("2026-6-16 21:24"),
+            80,
+            Palette::default(),
+        );
+        let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            text,
+            "发表于 2026-6-7 13:13 · 由mod编辑于 2026-6-16 21:24",
+            "got {text}"
+        );
     }
 }

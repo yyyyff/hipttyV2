@@ -93,7 +93,7 @@ pub fn format_relative_time(raw: &str) -> String {
 }
 
 pub fn format_relative_time_at(raw: &str, now: DateTime<Local>) -> String {
-    let trimmed = raw.trim();
+    let trimmed = strip_published_prefix(raw);
     if trimmed.is_empty() {
         return String::new();
     }
@@ -104,6 +104,14 @@ pub fn format_relative_time_at(raw: &str, now: DateTime<Local>) -> String {
         Some(dt) => format_duration_zh(now.signed_duration_since(dt)),
         None => trimmed.to_string(),
     }
+}
+
+/// Strip Discuz `发表于` label if the raw field still carries it.
+pub fn strip_published_prefix(raw: &str) -> &str {
+    let t = raw.trim();
+    t.strip_prefix("发表于")
+        .map(str::trim)
+        .unwrap_or(t)
 }
 
 fn is_already_relative(raw: &str) -> bool {

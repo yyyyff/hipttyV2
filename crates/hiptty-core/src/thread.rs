@@ -39,6 +39,7 @@ pub struct Post {
     pub author: String,
     pub uid: Option<String>,
     pub avatar_url: Option<String>,
+    /// Post time (datetime only; Discuz `发表于` prefix is stripped at parse).
     pub time: String,
     pub content: Vec<ContentNode>,
     pub poll: Option<Poll>,
@@ -46,6 +47,12 @@ pub struct Post {
     pub warned: bool,
     /// User signature from `div.signatures` when present (reserved for future clients).
     pub signature: Option<String>,
+    /// Last editor from Discuz `本帖最后由 … 编辑` notice (often the author).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_by: Option<String>,
+    /// Last edit time from the same notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

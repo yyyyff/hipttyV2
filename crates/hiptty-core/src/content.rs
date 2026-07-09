@@ -5,6 +5,10 @@ pub struct Style {
     pub fg: Option<String>,
     pub bold: bool,
     pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strikethrough: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +52,11 @@ impl From<TextSpan> for ContentSpan {
 
 impl Style {
     fn is_default(style: &Style) -> bool {
-        style.fg.is_none() && !style.bold && !style.italic
+        style.fg.is_none()
+            && !style.bold
+            && !style.italic
+            && !style.underline
+            && !style.strikethrough
     }
 }
 

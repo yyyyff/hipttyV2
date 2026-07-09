@@ -58,12 +58,13 @@ Error codes: `AUTH_REQUIRED`, `AUTH_FAILED`, `NETWORK`, `PARSE`, `RATE_LIMIT`, `
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `pid`, `floor`, `author`, `time`, `page` | | |
+| `pid`, `floor`, `author`, `time`, `page` | | `time` is bare datetime (Discuz `发表于` stripped) |
 | `uid`, `avatar_url` | optional | |
 | `content` | `ContentNode[]` | Text spans, images, attachments, quotes |
 | `poll` | optional | Floor 1 only when thread is a poll |
 | `warned` | bool | |
-| `signature` | optional string | Parsed from `div.signatures`; reserved for future clients |
+| `signature` | optional string | Parsed from `div.signatures` |
+| `edited_by`, `edited_at` | optional | From `本帖最后由 … 编辑`; shown in floor chrome, not body |
 
 ### Content
 
