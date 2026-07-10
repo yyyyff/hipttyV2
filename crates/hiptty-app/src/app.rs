@@ -610,25 +610,13 @@ impl App {
             return hints;
         }
         match self.overlay {
-            Overlay::ForumPicker => vec![
-                KeyHint::new("j/k", "选择", 0),
-                KeyHint::new("Enter", "确认", 0),
-                KeyHint::new("Esc", "关闭", 0),
-            ],
-            Overlay::MainMenu => vec![
-                KeyHint::new("j/k", "移动", 0),
-                KeyHint::new("Enter", "确认", 0),
-                KeyHint::new("Esc", "关闭", 0),
-            ],
-            Overlay::Settings => vec![
-                KeyHint::new("j/k", "移动", 0),
-                KeyHint::new("Enter", "修改", 0),
-                KeyHint::new("Esc", "关闭", 0),
-            ],
-            Overlay::SearchPrompt => vec![
-                KeyHint::new("Enter", "搜索", 0),
-                KeyHint::new("Esc", "取消", 0),
-            ],
+            // Modal / picker footers already list shortcuts — keep status bar clean.
+            Overlay::ForumPicker
+            | Overlay::MainMenu
+            | Overlay::Settings
+            | Overlay::SearchPrompt => {
+                vec![]
+            }
             Overlay::CommandBar => vec![
                 KeyHint::new("Enter", "执行", 0),
                 KeyHint::new("Esc", "取消", 0),

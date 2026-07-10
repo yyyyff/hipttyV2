@@ -1,4 +1,5 @@
 pub mod composer;
+pub mod content_state;
 pub mod floor_list;
 pub mod forum_picker;
 pub mod forum_tabs;
@@ -16,10 +17,13 @@ pub mod status_bar;
 pub mod thread_list;
 pub mod title_bar;
 pub mod toast;
+#[cfg(test)]
+mod visual_snapshot;
 
 pub use composer::{
     composer_height, draw_composer, draw_confirm_dialog, ComposerFocus, ComposerProps, ConfirmProps,
 };
+pub use content_state::{draw_content_placeholder, list_placeholder, ContentPlaceholderKind};
 pub use floor_list::{
     capture_detail_scroll_anchor, clamp_scroll_top, detail_line_scroll, detail_step_down,
     detail_step_up, draw_floor_list, ensure_scroll_top, first_visible_floor, floor_index_at_line,

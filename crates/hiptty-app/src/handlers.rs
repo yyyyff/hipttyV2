@@ -714,8 +714,13 @@ pub fn handle_worker_extensions(
                     if is_auth_required(err) {
                         crate::event::try_auto_relogin(app, worker_tx);
                     } else {
-                        app.pm_thread.error = Some(err.to_string());
-                        app.set_toast(err.to_string(), true);
+                        let msg = err.to_string();
+                        if app.pm_thread.messages.is_empty() {
+                            app.pm_thread.error = Some(msg.clone());
+                        } else {
+                            app.pm_thread.error = None;
+                        }
+                        app.set_toast(msg, true);
                     }
                 }
             }
@@ -811,8 +816,18 @@ pub fn handle_worker_extensions(
                     if is_auth_required(err) {
                         crate::event::try_auto_relogin(app, worker_tx);
                     } else {
-                        app.detail.error = Some(err.to_string());
-                        app.set_toast(err.to_string(), true);
+                        let msg = err.to_string();
+                        let has_posts = app
+                            .detail
+                            .detail
+                            .as_ref()
+                            .is_some_and(|d| !d.posts.is_empty());
+                        if has_posts {
+                            app.detail.error = None;
+                        } else {
+                            app.detail.error = Some(msg.clone());
+                        }
+                        app.set_toast(msg, true);
                     }
                 }
             }

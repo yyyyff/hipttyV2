@@ -721,8 +721,19 @@ pub fn handle_worker_response(
                     if is_auth_required(&err) {
                         try_auto_relogin(app, worker_tx);
                     } else {
-                        app.detail.error = Some(error_message(&err));
-                        app.set_toast(error_message(&err), true);
+                        let msg = error_message(&err);
+                        // Keep floors visible on refresh failure; only page-level error when empty.
+                        let has_posts = app
+                            .detail
+                            .detail
+                            .as_ref()
+                            .is_some_and(|d| !d.posts.is_empty());
+                        if has_posts {
+                            app.detail.error = None;
+                        } else {
+                            app.detail.error = Some(msg.clone());
+                        }
+                        app.set_toast(msg, true);
                     }
                 }
             }
@@ -766,8 +777,14 @@ pub fn handle_worker_response(
                     if is_auth_required(&err) {
                         try_auto_relogin(app, worker_tx);
                     } else {
-                        app.feed.error = Some(error_message(&err));
-                        app.set_toast(error_message(&err), true);
+                        let msg = error_message(&err);
+                        if app.feed.threads.is_empty() {
+                            app.feed.error = Some(msg.clone());
+                        } else {
+                            // Stale list stays; surface failure as toast only.
+                            app.feed.error = None;
+                        }
+                        app.set_toast(msg, true);
                     }
                 }
             }

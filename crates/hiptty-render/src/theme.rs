@@ -124,9 +124,10 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
-/// Logo breathing cycle in ticks (50ms each). ~0.4s full cycle.
-const LOGO_CYCLE: u64 = 8;
-const LOGO_CHAR_OFFSET: u64 = 3;
+/// Logo breathing cycle in ticks (50ms each). ~3.0s full cycle (slow breath, not flash).
+const LOGO_CYCLE: u64 = 60;
+/// Per-character phase lag in ticks; small vs cycle so the wave is a soft shimmer.
+const LOGO_CHAR_OFFSET: u64 = 2;
 
 pub fn logo_color(tick: u64, palette: Palette) -> Color {
     let phase = (tick % LOGO_CYCLE) as f32 / LOGO_CYCLE as f32;

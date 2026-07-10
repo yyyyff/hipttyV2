@@ -180,7 +180,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(props.palette.muted_style())
-        .title(Span::styled(shortcuts, props.palette.muted_style()));
+        .title(Span::styled(shortcuts, props.palette.secondary_style()));
     let textarea_area = chunks[idx];
     let inner = block.inner(textarea_area);
     frame.render_widget(block, textarea_area);
@@ -201,7 +201,7 @@ pub fn draw_composer(frame: &mut Frame<'_>, area: Rect, props: ComposerProps<'_>
             ComposerFocus::Body | ComposerFocus::Subject => "正文",
         };
         frame.render_widget(
-            Paragraph::new(hint).style(props.palette.muted_style()),
+            Paragraph::new(hint).style(props.palette.secondary_style()),
             chunks[idx],
         );
     }

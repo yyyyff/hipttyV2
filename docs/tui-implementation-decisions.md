@@ -18,7 +18,7 @@
 | §6.3 `#` 跳楼层 | **不做** | |
 | §6.4 投票块「当前选中项」高亮 | **延后** | 与楼层/投票排版大修时一起做 |
 | §12 Feed↔Detail 切换动画 | **不做** | 滑动导致 Kitty 头像残留；用加载动画代替 |
-| §16 终端 &lt; 80×24 警告 | **已取消** | 不再硬拦截；仅 width/height == 0 时跳过绘制，小窗口尽量继续可用 |
+| §16 终端 &lt; 80×24 警告 | **已取消（C3-a）** | 不硬拦截；窄窗做渐进降级（藏头像 / 藏计数 / active tab 优先），仅 width/height == 0 时跳过绘制 |
 | §16 引用嵌套展平 | **不关心** | 论坛内容不会出现 Quote 嵌套 Quote |
 | §16 头像失败：首字符 / dim 方块 | **保持现状** | 使用 `noavatar` 占位 + `…` |
 | §3 图片「不做降级」 | **实际有 WT 策略** | Windows Terminal 帖子大图走 Sixel；头像/表情走 Kitty；以运行时稳定为准 |
@@ -132,7 +132,7 @@
 
 ### 5.3 动画（仅状态反馈）
 
-**做**：加载/处理中指示——列表/详情主反馈在 Status Bar 右侧（`加载中…`）；composer/confirm 等仍用自身 loading 态。
+**做**：加载/处理中指示——**有旧数据时**主反馈在 Status Bar 右侧（`加载中…`）；**首载无数据**时内容区居中 `正在加载` 占位。composer/confirm 等仍用自身 loading 态。Logo 呼吸约 3s/周期。
 
 **不做**：窗口/页面切换 slide、弹层 fade-scale、编辑器/Toast 位移动画。
 
@@ -154,15 +154,29 @@
 - 发送中 status bar 右侧显示「发送中…」（含图片处理）；composer 标题同步「发送中…」。
 - Worker `UploadComposerImage` 仍保留供 CLI/调试；TUI 不走该路径。
 
-### 5.5b Status Bar（2026-07-09）
+### 5.5b Status Bar（2026-07-09，2026-07-10 修订）
 
-- **布局**：左 `KeyHint` 快捷键（accent 键 + secondary 说明，窄屏按 priority 丢次要键）+ 右状态（`加载中…` / `页码 page/max`）。
-- **Loading**：内容区底部 `draw_loading_indicator` 不再作为主反馈；loading 走 status 右侧（列表/详情保留旧内容直至响应）。
+- **布局**：左 `KeyHint` 快捷键（accent 键 + secondary 说明，窄屏按 priority 丢次要键）+ 右状态（`加载中…` / `页码 page/max`，`secondary` 色）。
+- **Loading**：首载无数据 → 内容区居中占位；有旧数据刷新 → 仅 status 右侧，列表不闪空。
+- **弹层期间**：MainMenu / Settings / SearchPrompt / ForumPicker **不**再在底栏重复快捷键（footer / 弹层内 hints 为准）。
 - **Command bar**：`:` 内联替换 status 行（vim cmdline）：左 `:` + 可移动光标输入，右为前缀过滤的命令建议；Tab 补全；Ctrl+U 清空；空 Enter 取消。不再单独 overlay；内容不 dim。
 - **命令目录**（`commands::COMMANDS`）：`q` `pm` `notif` `search` `my` `replies` `fav` `refresh` `login` `logout` `exit`（及别名）。
 - **详情页回复命令**：`r` → 主题回帖（`ReplyThread`）；`r#N` → 回复 N 楼（`ReplyPost`）；`rr#N` → 引用 N 楼（`QuotePost`）；楼层命令仅在已加载楼层上生效并选中该楼。
 - **详情页建议条**：隐藏 nav / 账号命令（`pm` `notif` `search` `my` `replies` `fav` `login` `logout`）；保留 `r` / `r#N` / `rr#N` / `q` / `refresh` / `exit`。
 - **快捷键调整**：Feed / 列表 `r` = 强制刷新（不再回复）；详情去掉全局 `q`/`e`/`d`（楼层上下文动作延后）。
+
+### 5.5c UI 精修（2026-07-10）
+
+| 项 | 决策 |
+|----|------|
+| 内容态 | 统一 `list_placeholder` + `draw_content_placeholder`：Loading / Empty / ErrorEmpty；有数据时错误仅 toast |
+| 选中态 | 左侧粉色 `│` = 键盘焦点；标题 accent+bold 辅助；去掉帖子列表 `accent_bg` 碎块 |
+| PM「我发的」 | 作者 `我 ·` 前缀 + accent 色；**不**占用焦点竖线；本轮不做右对齐气泡 |
+| 窄窗（C3-a） | 不硬拦截；&lt;55 列藏头像；标题列过窄藏回复/浏览量；forum tabs **active 优先可见** |
+| 色彩语义 | `muted` 分隔/装饰；`secondary` 帮助/快捷键/时间/状态；弹层 footer 用 secondary |
+| Toast | 暗色完整边框 + 亮色剩余时间弧，避免边框「坏掉」观感 |
+| Logo | 呼吸周期 ~3s（60×50ms），字符相位差减小 |
+| 回归 | `hiptty-widgets` `visual_snapshot`：40×12 / 80×24 / 120×40 关键字形断言 |
 
 ### 5.6 黑名单 — 当前行为（空壳）
 
@@ -236,3 +250,4 @@
 | 2026-07-10 | Auth barrier 全程暂存读请求；reset_session 清空解码等待队列；auth_in_flight 防重复 AutoLogin |
 | 2026-07-10 | Auth barrier 结束后丢弃暂存读；Logout/登录成功清理 session UI 与登录明文 |
 | 2026-07-10 | auth_op_id 门闩：忽略过期 Session/LoginResult/LoggedOut，防登录登出互相覆盖 |
+| 2026-07-10 | §5.5c UI 精修：内容态占位、选中竖线统一、PM 我方前缀、窄窗 C3-a、对比度、Toast/Logo/hints、visual_snapshot |

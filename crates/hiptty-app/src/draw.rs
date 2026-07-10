@@ -1,18 +1,17 @@
 use hiptty_core::{forum_name, list_item_to_thread_summary};
 use hiptty_render::{begin_frame_graphics, clear_graphics_in_area, fill_area_spaces};
 use hiptty_widgets::{
-    draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
-    draw_login, draw_main_menu, draw_pm_thread, draw_search_prompt, draw_settings_panel,
-    draw_simple_list, draw_startup, draw_status_bar, draw_thread_list, draw_title_bar, draw_toast,
-    draw_vertical_scrollbar, list_content_lines, main_layout, title_bar_hits, CommandLineProps,
-    ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps, ForumTabsProps, LoginFormProps,
-    MainMenuProps, PmThreadProps, SearchPromptProps, SettingsProps, SimpleListProps, StartupProps,
-    StatusBarProps, ThreadListProps, TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT,
-    SIMPLE_ITEM_HEIGHT,
+    draw_composer, draw_confirm_dialog, draw_content_placeholder, draw_dim_rule, draw_floor_list,
+    draw_forum_picker, draw_login, draw_main_menu, draw_pm_thread, draw_search_prompt,
+    draw_settings_panel, draw_simple_list, draw_startup, draw_status_bar, draw_thread_list,
+    draw_title_bar, draw_toast, draw_vertical_scrollbar, list_content_lines, list_placeholder,
+    main_layout, title_bar_hits, CommandLineProps, ComposerProps, ConfirmProps, FloorListProps,
+    ForumPickerProps, ForumTabsProps, LoginFormProps, MainMenuProps, PmThreadProps,
+    SearchPromptProps, SettingsProps, SimpleListProps, StartupProps, StatusBarProps,
+    ThreadListProps, TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    widgets::Paragraph,
     Frame,
 };
 
@@ -79,8 +78,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Page::Login => draw_login_page(frame, app, area),
         Page::ThreadFeed => draw_feed_shell(frame, app, area),
         Page::ThreadDetail => draw_detail_shell(frame, app, area),
-        Page::PmList | Page::Notifications => draw_simple_list_shell(frame, app, area, true),
+        Page::PmList | Page::Notifications => {
+            let show_avatar = show_list_avatar(area.width);
+            draw_simple_list_shell(frame, app, area, show_avatar)
+        }
         Page::Search | Page::MyThreads | Page::MyReplies | Page::Favorites => {
+            // Search/my lists: no avatar by design; density still drops counts via thread_list.
             draw_thread_list_shell(frame, app, area, false)
         }
         Page::PmThread => draw_pm_thread_shell(frame, app, area),
@@ -328,6 +331,13 @@ fn draw_login_page(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// Hide list avatars below this outer terminal width (C3 progressive density).
+const AVATAR_MIN_COLS: u16 = 55;
+
+fn show_list_avatar(terminal_width: u16) -> bool {
+    terminal_width >= AVATAR_MIN_COLS
+}
+
 fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -335,6 +345,7 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let palette = app.content_palette();
     let mask_cjk = app.dims_background();
     let [title_area, title_rule, content_area, status_rule, status_area] = main_layout(area);
+    let show_avatar = show_list_avatar(area.width);
 
     shell_title_bar(frame, app, title_area, None);
     draw_dim_rule(frame, title_rule, palette);
@@ -347,7 +358,16 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         content_len,
         u32::from(app.feed.scroll_lines),
     );
-    {
+    let placeholder = list_placeholder(
+        !app.feed.threads.is_empty(),
+        app.feed.loading,
+        app.feed.error.as_deref(),
+        "暂无内容",
+        "r 刷新 · n 新帖 · / 搜索",
+    );
+    if let Some(kind) = placeholder {
+        draw_content_placeholder(frame, content, palette, kind, app.tick);
+    } else {
         let feed = &app.feed;
         let images = app.image_cache.as_mut();
         draw_thread_list(
@@ -358,7 +378,7 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 threads: &feed.threads,
                 selected: feed.selected,
                 scroll_lines: feed.scroll_lines,
-                show_avatar: true,
+                show_avatar,
                 loading: feed.loading,
                 images,
                 mask_cjk,
@@ -366,7 +386,6 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
 
-    draw_list_error(frame, content, palette, app.feed.error.as_deref());
     repaint_title_chrome(frame, app, title_area, title_rule, None);
 
     draw_dim_rule(frame, status_rule, palette);
@@ -423,32 +442,47 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     {
-        // Rebuild layout before splitting borrows for draw.
-        app.ensure_detail_layout();
-        let selected = app.detail.selected;
-        let scroll_top = app.detail.scroll_top;
-        let layout = app.detail.layout.as_ref();
-        let images = app.image_cache.as_mut();
-        if let Some(detail) = app.detail.detail.as_ref() {
-            // Keep existing floors visible while reloading; loading is shown in status bar.
-            draw_floor_list(
-                frame,
-                content,
-                FloorListProps {
-                    palette,
-                    posts: &detail.posts,
-                    selected,
-                    scroll_top,
-                    show_avatar: true,
-                    images,
-                    mask_cjk,
-                    layout,
-                },
-            );
+        let has_posts = app
+            .detail
+            .detail
+            .as_ref()
+            .is_some_and(|d| !d.posts.is_empty());
+        let placeholder = list_placeholder(
+            has_posts,
+            app.detail.loading && !has_posts,
+            app.detail.error.as_deref(),
+            "暂无内容",
+            "r 刷新 · b 返回",
+        );
+        if let Some(kind) = placeholder {
+            draw_content_placeholder(frame, content, palette, kind, app.tick);
+        } else {
+            // Rebuild layout before splitting borrows for draw.
+            app.ensure_detail_layout();
+            let selected = app.detail.selected;
+            let scroll_top = app.detail.scroll_top;
+            let layout = app.detail.layout.as_ref();
+            let images = app.image_cache.as_mut();
+            if let Some(detail) = app.detail.detail.as_ref() {
+                // Keep existing floors visible while reloading; loading is shown in status bar.
+                draw_floor_list(
+                    frame,
+                    content,
+                    FloorListProps {
+                        palette,
+                        posts: &detail.posts,
+                        selected,
+                        scroll_top,
+                        show_avatar: show_list_avatar(area.width),
+                        images,
+                        mask_cjk,
+                        layout,
+                    },
+                );
+            }
         }
     }
 
-    draw_list_error(frame, content, palette, app.detail.error.as_deref());
     repaint_title_chrome(frame, app, chunks[0], chunks[1], counts.as_deref());
     draw_dim_rule(frame, chunks[3], palette);
     paint_status_bar(frame, app, chunks[4]);
@@ -472,21 +506,31 @@ fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
         content_len,
         u32::from(app.list_page.scroll_lines),
     );
-    let images = app.image_cache.as_mut();
-    draw_simple_list(
-        frame,
-        content,
-        SimpleListProps {
-            palette,
-            items: &app.list_page.items,
-            selected: app.list_page.selected,
-            scroll_lines: app.list_page.scroll_lines,
-            show_avatar,
-            images,
-            mask_cjk,
-        },
+    let placeholder = list_placeholder(
+        !app.list_page.items.is_empty(),
+        app.list_page.loading,
+        app.list_page.error.as_deref(),
+        "暂无内容",
+        "r 刷新 · b 返回",
     );
-    draw_list_error(frame, content, palette, app.list_page.error.as_deref());
+    if let Some(kind) = placeholder {
+        draw_content_placeholder(frame, content, palette, kind, app.tick);
+    } else {
+        let images = app.image_cache.as_mut();
+        draw_simple_list(
+            frame,
+            content,
+            SimpleListProps {
+                palette,
+                items: &app.list_page.items,
+                selected: app.list_page.selected,
+                scroll_lines: app.list_page.scroll_lines,
+                show_avatar,
+                images,
+                mask_cjk,
+            },
+        );
+    }
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
@@ -500,12 +544,6 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
 
-    let threads: Vec<_> = app
-        .list_page
-        .items
-        .iter()
-        .map(list_item_to_thread_summary)
-        .collect();
     let content_len = u32::from(list_content_lines(app.list_page.items.len(), ITEM_HEIGHT));
     let content = paint_scroll_area(
         frame,
@@ -514,22 +552,42 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
         content_len,
         u32::from(app.list_page.scroll_lines),
     );
-    let images = app.image_cache.as_mut();
-    draw_thread_list(
-        frame,
-        content,
-        ThreadListProps {
-            palette,
-            threads: &threads,
-            selected: app.list_page.selected,
-            scroll_lines: app.list_page.scroll_lines,
-            show_avatar,
-            loading: app.list_page.loading,
-            images,
-            mask_cjk,
-        },
+    let empty_hints = match app.page {
+        Page::Search => "r 刷新 · / 新搜索 · b 返回",
+        _ => "r 刷新 · b 返回",
+    };
+    let placeholder = list_placeholder(
+        !app.list_page.items.is_empty(),
+        app.list_page.loading,
+        app.list_page.error.as_deref(),
+        "暂无内容",
+        empty_hints,
     );
-    draw_list_error(frame, content, palette, app.list_page.error.as_deref());
+    if let Some(kind) = placeholder {
+        draw_content_placeholder(frame, content, palette, kind, app.tick);
+    } else {
+        let threads: Vec<_> = app
+            .list_page
+            .items
+            .iter()
+            .map(list_item_to_thread_summary)
+            .collect();
+        let images = app.image_cache.as_mut();
+        draw_thread_list(
+            frame,
+            content,
+            ThreadListProps {
+                palette,
+                threads: &threads,
+                selected: app.list_page.selected,
+                scroll_lines: app.list_page.scroll_lines,
+                show_avatar,
+                loading: app.list_page.loading,
+                images,
+                mask_cjk,
+            },
+        );
+    }
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
@@ -554,40 +612,31 @@ fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         content_len,
         u32::from(app.pm_thread.scroll_lines),
     );
-    draw_pm_thread(
-        frame,
-        content,
-        PmThreadProps {
-            palette,
-            messages: &app.pm_thread.messages,
-            my_username: app.session.username.as_deref().unwrap_or(""),
-            selected: app.pm_thread.selected,
-            scroll_lines: app.pm_thread.scroll_lines,
-            mask_cjk,
-        },
+    let placeholder = list_placeholder(
+        !app.pm_thread.messages.is_empty(),
+        app.pm_thread.loading,
+        app.pm_thread.error.as_deref(),
+        "暂无消息",
+        "r 回复 · b 返回",
     );
-    draw_list_error(frame, content, palette, app.pm_thread.error.as_deref());
+    if let Some(kind) = placeholder {
+        draw_content_placeholder(frame, content, palette, kind, app.tick);
+    } else {
+        draw_pm_thread(
+            frame,
+            content,
+            PmThreadProps {
+                palette,
+                messages: &app.pm_thread.messages,
+                my_username: app.session.username.as_deref().unwrap_or(""),
+                selected: app.pm_thread.selected,
+                scroll_lines: app.pm_thread.scroll_lines,
+                mask_cjk,
+            },
+        );
+    }
     repaint_title_chrome(frame, app, chunks[0], chunks[1], None);
 
     draw_dim_rule(frame, chunks[3], palette);
     paint_status_bar(frame, app, chunks[4]);
-}
-
-fn draw_list_error(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    palette: hiptty_render::Palette,
-    err: Option<&str>,
-) {
-    if let Some(err) = err {
-        frame.render_widget(
-            Paragraph::new(err).style(palette.error_style()),
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: 1,
-            },
-        );
-    }
 }

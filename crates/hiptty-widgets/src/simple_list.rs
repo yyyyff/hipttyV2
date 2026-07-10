@@ -103,6 +103,7 @@ fn draw_simple_item(
         width: 1,
         height: visible_rows,
     };
+    // Pink `│` = keyboard focus (shared language with thread/floor/pm lists).
     let bar = if selected { "│" } else { " " };
     frame.render_widget(
         Paragraph::new(bar).style(if selected {

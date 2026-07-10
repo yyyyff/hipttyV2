@@ -67,16 +67,18 @@ pub fn draw_toast(frame: &mut Frame<'_>, area: Rect, props: ToastProps<'_>) {
 
     frame.render_widget(Clear, toast_area);
 
-    let border_style = if props.is_error {
+    let border_bright = if props.is_error {
         props.palette.error_style()
     } else {
         props.palette.success_style()
     };
+    // Stable full outline so the countdown never looks like a broken border.
+    let border_dim = props.palette.muted_style();
     let surface = Style::default().bg(props.palette.accent_bg);
     fill_area_bg(frame, toast_area, surface);
 
     let remaining_frac = toast_remaining_fraction(props);
-    draw_toast_border(frame, toast_area, border_style, remaining_frac);
+    draw_toast_border(frame, toast_area, border_bright, border_dim, remaining_frac);
 
     if toast_area.width < 3 || toast_area.height < 3 {
         return;
@@ -168,14 +170,22 @@ fn toast_border_cells(area: Rect) -> Vec<(u16, u16, char)> {
     cells
 }
 
-fn draw_toast_border(frame: &mut Frame<'_>, area: Rect, style: Style, remaining_frac: f32) {
+fn draw_toast_border(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    bright: Style,
+    dim: Style,
+    remaining_frac: f32,
+) {
     let cells = toast_border_cells(area);
     if cells.is_empty() {
         return;
     }
 
-    let visible = (cells.len() as f32 * remaining_frac.clamp(0.0, 1.0)).round() as usize;
-    for (x, y, ch) in cells.into_iter().take(visible) {
+    // Full dim perimeter keeps a stable outline; bright arc shows remaining lifetime.
+    let lit = (cells.len() as f32 * remaining_frac.clamp(0.0, 1.0)).round() as usize;
+    for (i, (x, y, ch)) in cells.into_iter().enumerate() {
+        let style = if i < lit { bright } else { dim };
         frame.render_widget(
             Paragraph::new(ch.to_string()).style(style),
             Rect {

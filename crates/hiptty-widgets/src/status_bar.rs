@@ -84,7 +84,7 @@ pub fn draw_status_bar(frame: &mut Frame<'_>, area: Rect, props: StatusBarProps<
     if right_w > 0 {
         frame.render_widget(
             Paragraph::new(truncate_str(right, right_w as usize))
-                .style(props.palette.muted_style())
+                .style(props.palette.secondary_style())
                 .alignment(Alignment::Right),
             chunks[2],
         );

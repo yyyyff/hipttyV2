@@ -88,18 +88,22 @@ fn draw_pm_message(
     mask_cjk: bool,
 ) {
     let is_mine = msg.author.as_deref() == Some(my_username);
-    let bar_style = if is_mine {
-        palette.accent_style()
-    } else {
-        palette.muted_style()
-    };
+    // Pink `│` is keyboard focus only — not "message from me".
     let bar = Rect {
         x: area.x,
         y: area.y,
         width: 1,
         height: area.height.saturating_sub(1),
     };
-    frame.render_widget(Paragraph::new("│").style(bar_style), bar);
+    let bar_ch = if selected { "│" } else { " " };
+    frame.render_widget(
+        Paragraph::new(bar_ch).style(if selected {
+            palette.accent_style()
+        } else {
+            palette.muted_style()
+        }),
+        bar,
+    );
 
     let body = Rect {
         x: area.x + 1,
@@ -107,29 +111,46 @@ fn draw_pm_message(
         width: area.width.saturating_sub(1),
         height: area.height.saturating_sub(1),
     };
-    let author = maybe_mask_cjk(msg.author.as_deref().unwrap_or("?"), mask_cjk);
+    let author_raw = maybe_mask_cjk(msg.author.as_deref().unwrap_or("?"), mask_cjk);
+    // "Mine" affordance: accent author + 我 · prefix (not the focus bar).
+    let author_label = if is_mine {
+        format!("我 · {author_raw}")
+    } else {
+        author_raw.into_owned()
+    };
     let time = msg
         .time
         .as_deref()
         .map(format_relative_time)
         .unwrap_or_default();
     let time = maybe_mask_cjk(&time, mask_cjk);
-    let header = format!("{author}  {time}");
     let text = msg.title.as_deref().or(msg.info.as_deref()).unwrap_or("");
     let plain = strip_html_tags(text);
     let plain = maybe_mask_cjk(&plain, mask_cjk);
     let width = body.width.saturating_sub(1) as usize;
-    let header = truncate_str(header.as_ref(), width);
     let body_text = truncate_str(plain.as_ref(), width);
 
-    let header_style = if selected {
+    let author_style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)
+    } else if is_mine {
+        palette.accent_style()
     } else {
         palette.secondary_style()
     };
+    let time_style = palette.secondary_style();
     let mut lines = Vec::new();
     if intra_skip == 0 {
-        lines.push(Line::from(Span::styled(header, header_style)));
+        let time_part = if time.is_empty() {
+            String::new()
+        } else {
+            format!("  {time}")
+        };
+        let author_budget = width.saturating_sub(str_width(&time_part));
+        let author = truncate_str(&author_label, author_budget);
+        lines.push(Line::from(vec![
+            Span::styled(author, author_style),
+            Span::styled(time_part, time_style),
+        ]));
     }
     if intra_skip <= 1 {
         lines.push(Line::from(Span::styled(
@@ -140,7 +161,6 @@ fn draw_pm_message(
     if !lines.is_empty() {
         frame.render_widget(Paragraph::new(lines), body);
     }
-    let _ = str_width;
 }
 
 fn strip_html_tags(input: &str) -> String {

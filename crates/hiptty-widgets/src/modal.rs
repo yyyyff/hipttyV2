@@ -74,9 +74,10 @@ pub fn begin_modal<'a>(
     }
 
     if let Some(hint) = footer {
+        // Footer shortcuts are actionable help text — use secondary, not decorative muted.
         frame.render_widget(
             Paragraph::new(hint)
-                .style(palette.muted_style())
+                .style(palette.secondary_style())
                 .alignment(Alignment::Center),
             chunks[1],
         );

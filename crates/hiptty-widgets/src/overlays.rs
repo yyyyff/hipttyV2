@@ -60,7 +60,7 @@ pub fn draw_main_menu(frame: &mut Frame<'_>, area: Rect, props: MainMenuProps) -
 
     frame.render_widget(
         Paragraph::new(MAIN_MENU_HINTS)
-            .style(props.palette.muted_style())
+            .style(props.palette.secondary_style())
             .alignment(Alignment::Center),
         chunks[2],
     );

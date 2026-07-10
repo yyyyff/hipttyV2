@@ -6,7 +6,6 @@ use hiptty_render::{
 };
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
-    style::Modifier,
     widgets::Paragraph,
     Frame,
 };
@@ -14,9 +13,14 @@ use ratatui::{
 pub const ITEM_HEIGHT: u16 = 3;
 const CONTENT_ROWS: u16 = 2;
 const CONTENT_RIGHT_PAD: u16 = 1;
+/// Left focus bar (`│`) — keyboard selection affordance shared with simple/floor lists.
+const BAR_W: u16 = 1;
 const AVATAR_W: u16 = AVATAR_COLS;
 const AVATAR_GAP: u16 = 1;
 const COUNT_GAP: &str = "   ";
+/// Hide reply/view counts when the text column is tighter than this
+/// (≈ terminal width ≲ 45 after focus bar / no avatar).
+const MIN_COUNTS_COLS: u16 = 42;
 
 pub struct ThreadListProps<'a> {
     pub palette: Palette,
@@ -131,32 +135,37 @@ fn draw_thread_item(
         0
     };
 
-    let body = Rect {
-        x: band.x,
-        y: band.y,
-        width: band.width,
-        height: band_h,
-    };
-
+    // Focus bar | avatar | gap | text
     let cols = Layout::horizontal([
+        Constraint::Length(BAR_W),
         Constraint::Length(if show_avatar { AVATAR_W } else { 0 }),
         Constraint::Length(if show_avatar { AVATAR_GAP } else { 0 }),
         Constraint::Min(0),
     ])
-    .split(body);
+    .split(band);
+
+    let bar = if selected { "│" } else { " " };
+    frame.render_widget(
+        Paragraph::new(bar).style(if selected {
+            palette.accent_style()
+        } else {
+            palette.muted_style()
+        }),
+        cols[0],
+    );
 
     if show_avatar && avatar_h > 0 && intra_skip < AVATAR_ROWS {
         if let Some(cache) = images.as_deref() {
             let (avatar, placeholder) = cache.avatar_entries_for_draw(thread.avatar_url.as_deref());
             let avatar_area = Rect {
                 height: avatar_h,
-                ..cols[0]
+                ..cols[1]
             };
             draw_avatar_entry(frame, avatar_area, avatar, placeholder, palette, intra_skip);
         }
     }
 
-    let right_area = cols[2];
+    let right_area = cols[3];
     let mut text_y = right_area.y;
     if intra_skip == 0 && band_h >= 1 {
         let row = Rect {
@@ -188,7 +197,12 @@ fn draw_title_row(
     mask_cjk: bool,
 ) {
     let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
-    let counts = build_counts(thread);
+    let show_counts = usable_w >= MIN_COUNTS_COLS;
+    let counts = if show_counts {
+        build_counts(thread)
+    } else {
+        String::new()
+    };
     let counts_w = if counts.is_empty() {
         0
     } else {
@@ -207,8 +221,9 @@ fn draw_title_row(
     let title_line =
         build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize, mask_cjk);
 
+    // Focus: left bar + bold accent title (no local accent_bg wash).
     let title_style = if selected {
-        palette.selected_style().bg(palette.accent_bg)
+        palette.selected_style()
     } else {
         palette.title_style(thread.title_color.as_deref())
     };
@@ -216,17 +231,12 @@ fn draw_title_row(
     frame.render_widget(Paragraph::new(title_line).style(title_style), cols[0]);
 
     if !counts.is_empty() && cols[1].width > 0 {
-        let counts_style = if selected {
-            palette.secondary_style().bg(palette.accent_bg)
-        } else {
-            palette.secondary_style()
-        };
         frame.render_widget(
             Paragraph::new(truncate_str(
                 &counts,
                 cols[1].width.saturating_sub(1) as usize,
             ))
-            .style(counts_style)
+            .style(palette.secondary_style())
             .alignment(Alignment::Right),
             cols[1],
         );
@@ -244,15 +254,8 @@ fn draw_meta_row(
     let author = build_author_line(thread, mask_cjk);
     let time = maybe_mask_cjk(&build_time_line(thread), mask_cjk).into_owned();
     let usable_w = area.width.saturating_sub(CONTENT_RIGHT_PAD);
-
-    let meta_style = if selected {
-        palette
-            .accent_style()
-            .add_modifier(Modifier::BOLD)
-            .bg(palette.accent_bg)
-    } else {
-        palette.secondary_style()
-    };
+    let _ = selected; // selection is the left bar + title; meta stays secondary
+    let meta_style = palette.secondary_style();
 
     if time.is_empty() {
         frame.render_widget(
