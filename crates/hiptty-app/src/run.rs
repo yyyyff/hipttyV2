@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind, KeyboardEnhancementFlags};
 use hiptty_adapter::ForumClient;
 use hiptty_render::clear_terminal_graphics;
 use ratatui::backend::CrosstermBackend;
@@ -203,14 +203,10 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         restore_terminal_stdio();
         return Err(e);
     }
-    // Kitty keyboard protocol: lets Ctrl+Enter report as Enter+CONTROL (best-effort).
+    // Kitty progressive enhancement (best-effort). See [`keyboard_enhancement_flags`].
     let _ = crossterm::execute!(
         io::stdout(),
-        crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        )
+        crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
     );
     if let Err(e) = clear_terminal_graphics() {
         restore_terminal_stdio();
@@ -242,4 +238,36 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> i
     leave_err?;
     raw_err?;
     Ok(())
+}
+
+/// Kitty progressive enhancements enabled at startup.
+///
+/// **Do not** enable `REPORT_ALL_KEYS_AS_ESCAPE_CODES`. That flag stops the
+/// terminal from sending plain UTF-8 text and only emits CSI-u key events.
+/// Crossterm does not implement `REPORT_ASSOCIATED_TEXT`, so IME commits
+/// (Chinese / Japanese / Korean, etc.) never become `KeyCode::Char` and look
+/// like they "vanish" after composition. ASCII still worked because physical
+/// key codepoints are the key codes themselves.
+///
+/// Keep `DISAMBIGUATE_ESCAPE_CODES` so modified keys stay unambiguous.
+/// Composer submit still accepts Ctrl+S / Ctrl+J; Ctrl+Enter remains
+/// best-effort depending on the terminal.
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_flags_preserve_plain_text_for_ime() {
+        let flags = keyboard_enhancement_flags();
+        assert!(
+            !flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES),
+            "REPORT_ALL_KEYS_AS_ESCAPE_CODES drops IME text without REPORT_ASSOCIATED_TEXT"
+        );
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+    }
 }

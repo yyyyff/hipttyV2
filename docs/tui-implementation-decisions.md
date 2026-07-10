@@ -251,3 +251,4 @@
 | 2026-07-10 | Auth barrier 结束后丢弃暂存读；Logout/登录成功清理 session UI 与登录明文 |
 | 2026-07-10 | auth_op_id 门闩：忽略过期 Session/LoginResult/LoggedOut，防登录登出互相覆盖 |
 | 2026-07-10 | §5.5c UI 精修：内容态占位、选中竖线统一、PM 我方前缀、窄窗 C3-a、对比度、Toast/Logo/hints、visual_snapshot |
+| 2026-07-10 | 修：Kitty `REPORT_ALL_KEYS_AS_ESCAPE_CODES` 导致 IME 中文在登录/输入框“消失”（crossterm 无 associated text） |
