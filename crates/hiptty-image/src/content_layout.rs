@@ -366,7 +366,7 @@ fn prefix_quote_line(line: Line<'static>, palette: Palette) -> Line<'static> {
 fn image_block(cache_key: String, kind: ImageKind, cache: &ImageCache) -> ContentBlock {
     let (width, height, failed) = match cache.get(&cache_key).map(|e| &e.state) {
         Some(ImageState::Ready { width, height, .. }) => (*width, *height, false),
-        Some(ImageState::Failed) => (image_fail_width(kind), image_fail_height(kind), true),
+        Some(ImageState::Failed { .. }) => (image_fail_width(kind), image_fail_height(kind), true),
         _ => (image_loading_width(kind), image_loading_height(kind), false),
     };
     match kind {
@@ -491,7 +491,7 @@ mod tests {
             cache.poll();
             match cache.get(url).map(|e| &e.state) {
                 Some(ImageState::Ready { .. }) => return,
-                Some(ImageState::Failed) => return,
+                Some(ImageState::Failed { .. }) => return,
                 _ => thread::sleep(Duration::from_millis(2)),
             }
         }

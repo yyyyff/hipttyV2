@@ -302,6 +302,10 @@ pub struct App {
     pub pending_logout_op_id: Option<u64>,
     /// Auto/manual login or logout in flight. Cleared only by a matching auth response.
     pub auth_in_flight: bool,
+    /// Earliest time another AutoLogin may run after a retryable (network/rate-limit) failure.
+    pub auto_login_not_before: Option<std::time::Instant>,
+    /// Last AutoLogin network-error toast (message + wall time) for de-dupe.
+    pub last_auto_login_toast: Option<(String, std::time::Instant)>,
     /// Local credential-clear error retained so worker success cannot paint over it.
     pub logout_local_error: Option<String>,
     /// Next frame should emit Kitty placement deletes (scroll / layout / image ready).
@@ -319,7 +323,8 @@ pub struct App {
 }
 
 /// Max concurrent image HTTP fetches (decode is separate, multi-threaded in ImageCache).
-pub const IMAGE_FETCH_CONCURRENCY: usize = 3;
+/// Slightly above 3 so a dense feed of avatars fills in without long "…" stalls.
+pub const IMAGE_FETCH_CONCURRENCY: usize = 6;
 
 impl App {
     pub fn new(settings: AppSettings, config_dir: std::path::PathBuf, profile: String) -> Self {
@@ -387,6 +392,8 @@ impl App {
             latest_auth_op_id: 0,
             pending_logout_op_id: None,
             auth_in_flight: false,
+            auto_login_not_before: None,
+            last_auto_login_toast: None,
             logout_local_error: None,
             graphics_dirty: true,
             last_graphics_layout: None,

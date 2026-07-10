@@ -3,6 +3,7 @@ use scraper::{ElementRef, Html, Selector};
 
 use crate::http::urls::ForumUrls;
 use crate::parser::common::{extract_param, parse_int};
+use crate::parser::simple_list::max_page_from_elements;
 
 pub fn parse(html: &str, page: u32, urls: &ForumUrls) -> Result<ThreadList, AdapterError> {
     let document = Html::parse_document(html);
@@ -32,12 +33,24 @@ pub fn parse(html: &str, page: u32, urls: &ForumUrls) -> Result<ThreadList, Adap
         return Err(AdapterError::Parse("no threads found in forum page".into()));
     }
 
+    let max_page = parse_forum_list_max_page(&document).max(page).max(1);
+
     Ok(ThreadList {
         threads,
         page,
-        max_page: 1,
+        max_page,
         uid_hint,
     })
+}
+
+/// Forum thread-list pagination (`div.pages`), not per-thread `span.threadpages`.
+fn parse_forum_list_max_page(document: &Html) -> u32 {
+    let Ok(page_sel) =
+        Selector::parse("div.pages_btns div.pages a, div.pages_btns div.pages strong, div.pages a, div.pages strong")
+    else {
+        return 1;
+    };
+    max_page_from_elements(document, &page_sel)
 }
 
 fn parse_thread_row(tbody: ElementRef<'_>, urls: &ForumUrls) -> Option<ThreadSummary> {
@@ -172,5 +185,16 @@ mod tests {
             .threads
             .iter()
             .any(|t| !t.author.as_deref().unwrap_or("").is_empty()));
+        // Forum list chrome last page is 267 — not the max of thread reply pages.
+        assert_eq!(list.page, 1);
+        assert_eq!(
+            list.max_page, 267,
+            "must parse forum div.pages (not per-thread threadpages)"
+        );
+        let thread_reply_max = list.threads.iter().map(|t| t.max_page).max().unwrap_or(1);
+        assert!(
+            thread_reply_max < list.max_page,
+            "thread reply max ({thread_reply_max}) must not be used as list max_page"
+        );
     }
 }

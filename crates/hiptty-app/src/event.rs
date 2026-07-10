@@ -1,8 +1,17 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hiptty_core::{AdapterError, ErrorCode, PostAction};
 use hiptty_widgets::{ComposerFocus, LoginField};
 use ratatui_textarea::{Input as TextareaInput, Key as TextareaKey};
 use tokio::sync::mpsc;
+
+/// Cooldown after AutoLogin hits a retryable network error (avoids POST/toast loops).
+const AUTO_LOGIN_NETWORK_COOLDOWN: Duration = Duration::from_secs(45);
+/// Longer pause when the forum signals rate limiting.
+const AUTO_LOGIN_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(90);
+/// Suppress identical AutoLogin network toasts within this window.
+const AUTO_LOGIN_TOAST_DEDUPE: Duration = Duration::from_secs(30);
 
 use hiptty_image::thread_avatar_job;
 
@@ -17,7 +26,38 @@ use crate::handlers::{
 };
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
+/// Whether this key event should reach the app handlers.
+///
+/// Under Kitty `REPORT_EVENT_TYPES`, held keys emit `Repeat`. Navigation must keep
+/// moving while held; one-shot actions (Enter, Esc, `r`/`d`, …) must not fire again
+/// after Press already changed UI (toast dismiss → open thread, etc.).
+pub fn key_event_should_dispatch(key: &KeyEvent) -> bool {
+    match key.kind {
+        KeyEventKind::Press => true,
+        KeyEventKind::Repeat => is_navigation_repeat_key(key),
+        KeyEventKind::Release => false,
+    }
+}
+
+fn is_navigation_repeat_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    )
+}
+
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    // Defense in depth if a caller forgets the run-loop filter.
+    if !key_event_should_dispatch(&key) {
+        return;
+    }
     // Raw mode: Ctrl+C is a key event, not SIGINT — handle before CONTROL is filtered out.
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -524,34 +564,32 @@ pub fn handle_worker_response(
         return;
     }
     match response {
-        WorkerResponse::Session { auth_op_id, info } => {
+        WorkerResponse::Session { auth_op_id, result } => {
             if !app.is_current_auth_op(auth_op_id) {
                 return;
             }
             if !app.startup_done {
                 app.startup_done = true;
-                if info.logged_in {
-                    app.session = info;
-                    app.page = Page::ThreadFeed;
-                    request_threads(app, worker_tx, 1);
-                    send_check_unread(app, worker_tx);
-                } else if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
-                    app.prefill_login(&creds);
-                    app.login.loading = true;
-                    app.auth_in_flight = true;
-                    app.pending_logout_op_id = None;
-                    let op = app.begin_auth_op();
-                    let _ = worker_tx.send(WorkerRequest::AutoLogin {
-                        creds: StoredCreds {
-                            username: creds.username,
-                            password_md5: creds.password_md5,
-                            security_question: creds.security_question,
-                            security_answer: creds.security_answer,
-                        },
-                        auth_op_id: op,
-                    });
-                } else {
-                    app.page = Page::Login;
+                match result {
+                    Ok(info) if info.logged_in => {
+                        app.session = info;
+                        app.page = Page::ThreadFeed;
+                        request_threads(app, worker_tx, 1);
+                        send_check_unread(app, worker_tx);
+                    }
+                    Ok(_logged_out) => {
+                        // Confirmed logged out by the server — try saved credentials.
+                        begin_startup_auto_login(app, worker_tx);
+                    }
+                    Err(err) if is_retryable_network(&err) => {
+                        // Offline / timeout: cookies may still be valid. Do not treat as logout.
+                        enter_with_local_session_on_network_error(app, worker_tx, &err);
+                    }
+                    Err(err) => {
+                        // Unexpected check failure — still prefer local session over a false Login.
+                        // Single toast inside helper (no double message).
+                        enter_with_local_session_on_network_error(app, worker_tx, &err);
+                    }
                 }
             }
         }
@@ -577,6 +615,7 @@ pub fn handle_worker_response(
                         send_check_unread(app, worker_tx);
                     } else {
                         // Auto-login: bump epoch so prior session responses cannot apply.
+                        app.auto_login_not_before = None;
                         app.bump_session_epoch();
                         app.session.logged_in = true;
                         app.session.username = Some(username);
@@ -594,8 +633,17 @@ pub fn handle_worker_response(
                     app.login.loading = false;
                     if manual {
                         app.login.error = Some(error_message(&err));
+                    } else if is_retryable_network(&err) {
+                        // Mid-session re-login or startup AutoLogin hit the network — not AuthFailed.
+                        note_auto_login_retryable_failure(app, &err);
+                        restore_session_after_auto_login_network_error(app, worker_tx, &username);
                     } else {
+                        // Real auth failure (wrong password, expired secret, etc.).
+                        app.auto_login_not_before = None;
                         app.set_toast(format!("自动登录失败: {}", error_message(&err)), true);
+                        app.session.logged_in = false;
+                        app.session.username = None;
+                        app.session.uid = None;
                         app.page = Page::Login;
                     }
                 }
@@ -1036,6 +1084,71 @@ fn prefetch_feed_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
     enqueue_image_jobs(app, jobs, worker_tx);
 }
 
+/// Keep list avatars loading after eviction / scroll / transient failure.
+///
+/// Feed does not pin images during ThreadDetail (content images win the soft budget).
+/// When returning to the list, entries may be gone while `avatar_url` is still set.
+///
+/// **Request discipline** (via [`hiptty_image::ImageCache::request`]):
+/// - Pin visible (± pad) URLs every tick so soft eviction prefers off-screen leftovers.
+/// - Call `request` for those URLs: `Ready`/`Loading` no-op; miss → fetch; `Failed`
+///   retries with 1s/5s/10s backoff (max 3), permanent 404 never retries.
+/// - Disk / HTTP `NotFound` (no custom avatar) short-circuits without HTTP.
+pub fn maintain_list_avatars(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    match app.page {
+        Page::ThreadFeed => {
+            let item_h = hiptty_widgets::ITEM_HEIGHT.max(1);
+            let first = (app.feed.scroll_lines / item_h) as usize;
+            let visible = (app.viewport_height / item_h).max(1) as usize;
+            let pad = 8usize;
+            let start = first.saturating_sub(pad);
+            let end = (first + visible + pad).min(app.feed.threads.len());
+            let jobs: Vec<_> = app.feed.threads[start..end]
+                .iter()
+                .filter_map(thread_avatar_job)
+                .collect();
+            pin_and_request_avatars(app, jobs, worker_tx);
+        }
+        Page::PmList => {
+            let item_h = hiptty_widgets::SIMPLE_ITEM_HEIGHT.max(1);
+            let first = (app.list_page.scroll_lines / item_h) as usize;
+            let visible = (app.viewport_height / item_h).max(1) as usize;
+            let pad = 8usize;
+            let start = first.saturating_sub(pad);
+            let end = (first + visible + pad).min(app.list_page.items.len());
+            let jobs: Vec<_> = app.list_page.items[start..end]
+                .iter()
+                .filter_map(|item| {
+                    item.avatar_url
+                        .as_ref()
+                        .map(|url| hiptty_image::FetchRequest {
+                            url: url.clone(),
+                            kind: hiptty_image::ImageKind::Avatar,
+                        })
+                })
+                .collect();
+            pin_and_request_avatars(app, jobs, worker_tx);
+        }
+        _ => {}
+    }
+}
+
+fn pin_and_request_avatars(
+    app: &mut App,
+    jobs: Vec<hiptty_image::FetchRequest>,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
+    let pins: Vec<String> = jobs.iter().map(|j| j.url.clone()).collect();
+    if let Some(cache) = app.images_mut() {
+        cache.set_pinned_urls(pins);
+    }
+    // `request` gates: Ready/Loading skip; Failed only after cooldown; miss → HTTP.
+    enqueue_image_jobs(app, jobs, worker_tx);
+}
+
 pub fn enqueue_image_jobs(
     app: &mut App,
     jobs: Vec<hiptty_image::FetchRequest>,
@@ -1056,8 +1169,14 @@ pub fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerR
     if app.auth_in_flight {
         return;
     }
+    if app
+        .auto_login_not_before
+        .is_some_and(|t| Instant::now() < t)
+    {
+        return;
+    }
     if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
-        app.session.logged_in = false;
+        // Keep UI on the current page; only clear logged_in after a confirmed AuthFailed.
         app.auth_in_flight = true;
         app.pending_logout_op_id = None;
         app.logout_local_error = None;
@@ -1077,12 +1196,125 @@ pub fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerR
     }
 }
 
+fn note_auto_login_retryable_failure(app: &mut App, err: &AdapterError) {
+    let cooldown = if matches!(err.code(), ErrorCode::RateLimit) {
+        AUTO_LOGIN_RATE_LIMIT_COOLDOWN
+    } else {
+        AUTO_LOGIN_NETWORK_COOLDOWN
+    };
+    app.auto_login_not_before = Some(Instant::now() + cooldown);
+    let message = if matches!(err.code(), ErrorCode::RateLimit) {
+        format!("自动登录暂不可用（限流）: {}", error_message(err))
+    } else {
+        format!("自动登录暂不可用（网络）: {}", error_message(err))
+    };
+    let now = Instant::now();
+    let skip_toast = app.last_auto_login_toast.as_ref().is_some_and(|(prev, at)| {
+        prev == &message && now.duration_since(*at) < AUTO_LOGIN_TOAST_DEDUPE
+    });
+    if !skip_toast {
+        app.set_toast(message.clone(), true);
+        app.last_auto_login_toast = Some((message, now));
+    }
+}
+
 fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
 }
 
+fn is_retryable_network(err: &AdapterError) -> bool {
+    err.code().retryable()
+}
+
 fn error_message(err: &AdapterError) -> String {
     err.to_string()
+}
+
+/// Server confirmed logged-out at startup → AutoLogin if credentials exist.
+fn begin_startup_auto_login(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
+        app.prefill_login(&creds);
+        app.login.loading = true;
+        app.auth_in_flight = true;
+        app.pending_logout_op_id = None;
+        let op = app.begin_auth_op();
+        let _ = worker_tx.send(WorkerRequest::AutoLogin {
+            creds: StoredCreds {
+                username: creds.username,
+                password_md5: creds.password_md5,
+                security_question: creds.security_question,
+                security_answer: creds.security_answer,
+            },
+            auth_op_id: op,
+        });
+    } else {
+        app.page = Page::Login;
+    }
+}
+
+/// Startup check could not reach the forum. Prefer local credentials/cookies over Login.
+fn enter_with_local_session_on_network_error(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    err: &AdapterError,
+) {
+    if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
+        app.session.logged_in = true;
+        app.session.username = Some(creds.username.clone());
+        app.session.uid = None;
+        app.prefill_login(&creds);
+        app.login.loading = false;
+        app.page = Page::ThreadFeed;
+        let toast = if is_retryable_network(err) {
+            format!(
+                "网络异常，已用本地会话进入（可稍后刷新）: {}",
+                error_message(err)
+            )
+        } else {
+            format!(
+                "会话检查失败，已用本地会话进入（可稍后刷新）: {}",
+                error_message(err)
+            )
+        };
+        app.set_toast(toast, true);
+        // Cookie jar is already loaded by the client; try the feed (may fail again offline).
+        request_threads(app, worker_tx, 1);
+        send_check_unread(app, worker_tx);
+        return;
+    }
+    app.page = Page::Login;
+    let toast = if is_retryable_network(err) {
+        format!("无法连接论坛: {}", error_message(err))
+    } else {
+        format!("会话检查失败: {}", error_message(err))
+    };
+    app.set_toast(toast, true);
+}
+
+/// AutoLogin failed with a retryable error — restore optimistic session, do not force Login.
+fn restore_session_after_auto_login_network_error(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    username: &str,
+) {
+    if crate::config::load_credentials(&app.credentials_path).is_some() {
+        app.session.logged_in = true;
+        if app.session.username.is_none() {
+            app.session.username = Some(username.to_string());
+        }
+        // Startup AutoLogin path: still on Startup/Login with empty feed → enter Feed.
+        if matches!(app.page, Page::Startup | Page::Login) {
+            app.page = Page::ThreadFeed;
+            if app.feed.threads.is_empty() && !app.feed.loading {
+                request_threads(app, worker_tx, 1);
+                send_check_unread(app, worker_tx);
+            }
+        }
+        // Mid-session re-login: keep current page; user can retry when the network recovers.
+        return;
+    }
+    app.session.logged_in = false;
+    app.page = Page::Login;
 }
 
 pub fn startup(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {

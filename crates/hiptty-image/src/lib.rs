@@ -8,7 +8,10 @@ mod prefetch;
 mod smiley;
 
 pub use avatar_disk::AvatarDiskCache;
-pub use cache::{FetchOutcome, ImageCache, ImageEntry, ImageKind, ImageState, ReadyDraw};
+pub use cache::{
+    fail_retry_delay, FetchOutcome, ImageCache, ImageEntry, ImageKind, ImageState, ReadyDraw,
+    FAIL_COUNT_PERMANENT,
+};
 pub use content_layout::{
     content_loading_height_estimate, layout_post_blocks, ContentBlock, InlinePart,
 };

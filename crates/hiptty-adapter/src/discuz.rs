@@ -69,11 +69,9 @@ impl ForumClient for DiscuzClient {
     async fn forum_threads(&self, fid: u32, page: u32) -> AdapterResult<ThreadList> {
         let url = self.urls.thread_list(fid, page);
         let html = self.http.get_text(&url).await?;
-        let mut list = thread_list::parse(&html, page, &self.urls)?;
-        if list.max_page == 1 {
-            list.max_page = list.threads.iter().map(|t| t.max_page).max().unwrap_or(1);
-        }
-        Ok(list)
+        // List max_page comes from forum `div.pages` chrome only.
+        // Never fall back to per-thread `ThreadSummary.max_page` (reply pages).
+        thread_list::parse(&html, page, &self.urls)
     }
 
     async fn thread_detail(&self, tid: &str, page: u32) -> AdapterResult<ThreadDetail> {

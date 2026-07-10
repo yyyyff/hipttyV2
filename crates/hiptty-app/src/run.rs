@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind, KeyboardEnhancementFlags};
+use crossterm::event::{self, Event, KeyboardEnhancementFlags};
 use hiptty_adapter::ForumClient;
 use hiptty_render::clear_terminal_graphics;
 use ratatui::backend::CrosstermBackend;
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::draw::draw;
-use crate::event::{handle_key, handle_worker_response, startup};
+use crate::event::{handle_key, handle_worker_response, key_event_should_dispatch, startup};
 use crate::mouse::handle_mouse;
 use crate::worker::{spawn_worker, WorkerRequest, WorkerResponse};
 
@@ -62,7 +62,11 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
 
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // Press always; Repeat only for navigation (arrows/page/home/end).
+                // One-shot keys (Enter, Esc, r, d, …) must not re-fire after Press
+                // already changed UI. j/k still auto-repeat as plain text Presses
+                // without REPORT_ALL_KEYS_AS_ESCAPE_CODES.
+                Event::Key(key) if key_event_should_dispatch(&key) => {
                     handle_key(app, key, &worker_tx);
                 }
                 Event::Mouse(mouse) => {
@@ -85,6 +89,8 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
         if last_tick.elapsed() >= tick_rate {
             app.tick = app.tick.wrapping_add(1);
             last_tick = std::time::Instant::now();
+            // Pin / fill list avatars on the UI tick (~20Hz), not every key event.
+            crate::event::maintain_list_avatars(app, &worker_tx);
             // Coalesce: never enqueue another check while one is still in the worker queue/flight.
             if app.session.logged_in
                 && !app.unread.check_in_flight
@@ -269,5 +275,33 @@ mod tests {
             "REPORT_ALL_KEYS_AS_ESCAPE_CODES drops IME text without REPORT_ASSOCIATED_TEXT"
         );
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+    }
+
+    #[test]
+    fn only_navigation_keys_dispatch_on_repeat() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        use crate::event::key_event_should_dispatch;
+
+        let press = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let repeat = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Repeat,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+
+        assert!(key_event_should_dispatch(&press(KeyCode::Enter)));
+        assert!(key_event_should_dispatch(&press(KeyCode::Char('r'))));
+        assert!(key_event_should_dispatch(&repeat(KeyCode::Down)));
+        assert!(key_event_should_dispatch(&repeat(KeyCode::PageUp)));
+        assert!(!key_event_should_dispatch(&repeat(KeyCode::Enter)));
+        assert!(!key_event_should_dispatch(&repeat(KeyCode::Esc)));
+        assert!(!key_event_should_dispatch(&repeat(KeyCode::Char('d'))));
+        assert!(!key_event_should_dispatch(&repeat(KeyCode::Char('r'))));
     }
 }

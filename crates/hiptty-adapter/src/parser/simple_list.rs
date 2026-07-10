@@ -304,7 +304,6 @@ fn empty_simple_list() -> SimpleList {
 
 fn parse_search_pagination(document: &Html) -> Result<(u32, Option<String>), AdapterError> {
     let page_sel = selector("div.pages_btns div.pages a, div.pages_btns div.pages strong")?;
-    let mut max_page = 1u32;
     let mut search_id = None;
 
     for el in document.select(&page_sel) {
@@ -315,12 +314,9 @@ fn parse_search_pagination(document: &Html) -> Result<(u32, Option<String>), Ada
                 search_id = Some(id);
             }
         }
-        let n = parse_int(&el.text().collect::<String>());
-        if n > max_page {
-            max_page = n;
-        }
     }
 
+    let max_page = max_page_from_elements(document, &page_sel);
     Ok((max_page, search_id))
 }
 
@@ -334,15 +330,38 @@ fn parse_pages_max(document: &Html) -> Result<u32, AdapterError> {
     Ok(max_page_from_elements(document, &page_sel))
 }
 
-fn max_page_from_elements(document: &Html, page_sel: &Selector) -> u32 {
+/// Max list page from Discuz `div.pages` chrome.
+///
+/// Prefer `href` `page=` (covers `class="last">... 267</a>` where the label is not a bare
+/// integer). Fall back to element text digits.
+pub(crate) fn max_page_from_elements(document: &Html, page_sel: &Selector) -> u32 {
     let mut max_page = 1u32;
     for el in document.select(page_sel) {
-        let n = parse_int(&el.text().collect::<String>());
+        if let Some(href) = el.value().attr("href") {
+            let p = extract_param(href, "page=", "&");
+            if !p.is_empty() {
+                let n = parse_int(&p);
+                if n > max_page {
+                    max_page = n;
+                }
+            }
+        }
+        let n = page_label_number(&el.text().collect::<String>());
         if n > max_page {
             max_page = n;
         }
     }
     max_page
+}
+
+/// Parse `12` or labels like `... 267` / `…267`.
+fn page_label_number(label: &str) -> u32 {
+    let t = label.trim();
+    if let Ok(n) = t.parse::<u32>() {
+        return n;
+    }
+    let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+    parse_int(&digits)
 }
 
 fn parse_search_tbody(tbody: ElementRef<'_>, urls: &ForumUrls) -> Option<ListItem> {

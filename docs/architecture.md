@@ -168,7 +168,7 @@ Logout/登录成功还会 `reset_session_ui` 清 nav/详情/列表/私信/compos
 
 **图像路径**：`run.rs` 启动时 `Picker::from_query_stdio()` 探测协议一次；`worker` 收到 `FetchImage` 后下载解码，结果写入 `ImageCache`；绘制时 `hiptty-image::draw` 按协议渲染。
 
-**会话**：启动时 `CheckSession` → 可选 `AutoLogin`（读 `{profile}.credentials.json`）→ 进入 `ThreadFeed` 或 `Login`。
+**会话**：启动时 `CheckSession` → 已登录进 `ThreadFeed`；确认未登录则可选 `AutoLogin`（读 `{profile}.credentials.json`）→ `ThreadFeed` 或 `Login`。`CheckSession` / `AutoLogin` 的**网络错误**不视为登出：有本地凭据时乐观进入 `ThreadFeed` 并 toast，避免把用户踢回登录页。
 
 ---
 

@@ -74,7 +74,7 @@ pub fn draw_graphic_in_viewport(
                 }
             }
         }
-        Some(ImageState::Failed) => draw_fail_label(
+        Some(ImageState::Failed { .. }) => draw_fail_label(
             frame, viewport, fail_label, doc_x, doc_y, scroll_top, palette,
         ),
         _ => draw_loading_label(frame, viewport, doc_x, doc_y, scroll_top, palette),
@@ -108,7 +108,7 @@ pub fn draw_image_entry(
                 frame.render_widget(Image::new(protocol), area);
             }
         },
-        Some(ImageState::Failed) => {
+        Some(ImageState::Failed { .. }) => {
             frame.render_widget(
                 Paragraph::new(fail_label).style(palette.muted_style()),
                 area,
@@ -135,6 +135,8 @@ pub fn draw_avatar_entry(
         draw_image_entry(frame, area, entry, palette, "", slice_skip_rows);
         return;
     }
+    // Loading / Failed / missing: show forum-style default face (not "…").
+    // Real custom avatars replace this once Ready.
     if matches!(
         placeholder.map(|e| &e.state),
         Some(ImageState::Ready { .. })

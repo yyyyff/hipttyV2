@@ -1124,16 +1124,130 @@ mod tests {
             &mut app,
             WorkerResponse::Session {
                 auth_op_id: 1,
-                info: hiptty_core::SessionInfo {
+                result: Ok(hiptty_core::SessionInfo {
                     logged_in: true,
                     username: Some("alice".into()),
                     uid: Some("1".into()),
-                },
+                }),
             },
             &tx,
         );
         assert!(!app.session.logged_in);
         assert!(!app.startup_done);
+        assert_eq!(app.page, Page::Login);
+    }
+
+    #[test]
+    fn startup_network_error_with_credentials_enters_feed_not_login() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("default.credentials.json");
+        std::fs::write(
+            &creds_path,
+            r#"{"username":"alice","password_md5":"abc","security_question":"0","security_answer":""}"#,
+        )
+        .expect("write creds");
+
+        let mut app = test_app();
+        app.credentials_path = creds_path;
+        app.page = Page::Startup;
+        app.startup_done = false;
+        app.latest_auth_op_id = 1;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::Session {
+                auth_op_id: 1,
+                result: Err(AdapterError::Network("timeout".into())),
+            },
+            &tx,
+        );
+
+        assert!(app.startup_done);
+        assert!(app.session.logged_in, "must not treat network as logout");
+        assert_eq!(app.session.username.as_deref(), Some("alice"));
+        assert_eq!(app.page, Page::ThreadFeed);
+        assert!(
+            app.toast.as_ref().is_some_and(|t| t.message.contains("网络")),
+            "should toast network issue"
+        );
+        // Feed load attempted with existing cookie jar.
+        assert!(matches!(
+            rx.try_recv().ok(),
+            Some(WorkerRequest::LoadThreads { page: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn auto_login_network_error_does_not_force_login_page() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("default.credentials.json");
+        std::fs::write(
+            &creds_path,
+            r#"{"username":"alice","password_md5":"abc","security_question":"0","security_answer":""}"#,
+        )
+        .expect("write creds");
+
+        let mut app = test_app();
+        app.credentials_path = creds_path;
+        app.page = Page::ThreadDetail;
+        app.session.logged_in = true;
+        app.session.username = Some("alice".into());
+        app.auth_in_flight = true;
+        app.startup_done = true;
+        app.latest_auth_op_id = 3;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::LoginResult {
+                auth_op_id: 3,
+                manual: false,
+                result: Err(AdapterError::Network("connection reset".into())),
+                username: "alice".into(),
+                password_plain: None,
+            },
+            &tx,
+        );
+
+        assert!(!app.auth_in_flight);
+        assert!(app.session.logged_in);
+        assert_eq!(app.page, Page::ThreadDetail, "must stay on current page");
+        assert!(app.toast.is_some());
+        assert!(
+            app.auto_login_not_before.is_some(),
+            "network AutoLogin failure must set cooldown"
+        );
+        // Immediate re-trigger must be suppressed.
+        crate::event::try_auto_relogin(&mut app, &tx);
+        assert!(
+            !app.auth_in_flight,
+            "cooldown must block another AutoLogin"
+        );
+    }
+
+    #[test]
+    fn auto_login_auth_failed_goes_to_login() {
+        let mut app = test_app();
+        app.page = Page::Startup;
+        app.auth_in_flight = true;
+        app.startup_done = true;
+        app.latest_auth_op_id = 1;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::LoginResult {
+                auth_op_id: 1,
+                manual: false,
+                result: Err(AdapterError::AuthFailed("登录失败".into())),
+                username: "alice".into(),
+                password_plain: None,
+            },
+            &tx,
+        );
+
+        assert!(!app.session.logged_in);
         assert_eq!(app.page, Page::Login);
     }
 

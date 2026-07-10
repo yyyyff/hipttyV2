@@ -143,7 +143,8 @@ pub struct StoredCreds {
 pub enum WorkerResponse {
     Session {
         auth_op_id: u64,
-        info: SessionInfo,
+        /// `Err` is a transport/check failure — **not** proof the user is logged out.
+        result: AdapterResult<SessionInfo>,
     },
     LoginResult {
         auth_op_id: u64,
@@ -570,13 +571,10 @@ async fn handle_session_write<C: ForumClient + ?Sized>(
 ) {
     match req {
         WorkerRequest::CheckSession { auth_op_id } => {
+            // Propagate errors: network blips must not be coerced into `logged_in: false`
+            // (that used to force AutoLogin → Login page while cookies were still valid).
             let result = client.session_status().await;
-            let info = result.unwrap_or(SessionInfo {
-                logged_in: false,
-                username: None,
-                uid: None,
-            });
-            let _ = tx.send(WorkerResponse::Session { auth_op_id, info });
+            let _ = tx.send(WorkerResponse::Session { auth_op_id, result });
         }
         WorkerRequest::AutoLogin { creds, auth_op_id } => {
             let credentials = Credentials {

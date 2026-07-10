@@ -20,10 +20,16 @@ use crate::mouse::install_scroll_chrome;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
-    // Pin set is only meaningful on ThreadDetail. Global Esc/b uses navigate_back() and
-    // never hits handle_detail_key's clear_pinned — drop pins here so Feed avatars etc.
-    // are not starved by soft-budget eviction of orphan pinned detail images.
-    if app.page != Page::ThreadDetail {
+    // Pin policy:
+    // - ThreadDetail: viewport content pins are set by detail prefetch.
+    // - ThreadFeed / PmList: `maintain_list_avatars` pins visible avatars each tick.
+    // - Everywhere else: drop pins so leftover detail/list pins cannot starve the soft budget.
+    //
+    // Global Esc/b uses navigate_back() and never hits handle_detail_key's clear_pinned.
+    if !matches!(
+        app.page,
+        Page::ThreadDetail | Page::ThreadFeed | Page::PmList
+    ) {
         if let Some(cache) = app.images_mut() {
             cache.clear_pinned();
         }

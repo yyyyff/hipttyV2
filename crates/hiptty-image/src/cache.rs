@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Condvar, Mutex,
 };
 use std::thread;
+use std::time::{Duration, Instant};
 
 use hiptty_render::is_windows_terminal;
 use ratatui::layout::Size;
@@ -47,6 +48,33 @@ impl ReadyDraw {
     }
 }
 
+/// Sentinel `fail_count` for disk 404 / permanent miss — never HTTP-retry.
+pub const FAIL_COUNT_PERMANENT: u8 = u8::MAX;
+
+/// Backoff after `fail_count` consecutive failures before another network attempt.
+///
+/// - `fail_count == 1` → wait 1s, then may retry (1st retry)
+/// - `fail_count == 2` → wait 5s (2nd retry)
+/// - `fail_count == 3` → wait 10s (3rd retry)
+/// - `fail_count >= 4` or permanent → `None` (stop)
+pub fn fail_retry_delay(fail_count: u8) -> Option<Duration> {
+    match fail_count {
+        1 => Some(Duration::from_secs(1)),
+        2 => Some(Duration::from_secs(5)),
+        3 => Some(Duration::from_secs(10)),
+        _ => None,
+    }
+}
+
+/// Cap on in-memory fail records (evicted URL backoff + permanent 404 marks).
+const MAX_FAIL_STREAK_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone, Copy)]
+struct FailRecord {
+    count: u8,
+    at: Instant,
+}
+
 #[derive(Clone)]
 pub enum ImageState {
     Loading,
@@ -57,7 +85,12 @@ pub enum ImageState {
         /// Byte cost charged against the soft Ready budget (pixel-based estimate at decode).
         estimated_bytes: u64,
     },
-    Failed,
+    /// Transient or permanent failure. See [`fail_retry_delay`] / [`FAIL_COUNT_PERMANENT`].
+    Failed {
+        at: Instant,
+        /// Consecutive failures for this URL (or [`FAIL_COUNT_PERMANENT`]).
+        fail_count: u8,
+    },
 }
 
 impl std::fmt::Debug for ImageState {
@@ -70,8 +103,23 @@ impl std::fmt::Debug for ImageState {
                 estimated_bytes,
                 ..
             } => write!(f, "Ready({width}x{height},~{estimated_bytes}B)"),
-            Self::Failed => write!(f, "Failed"),
+            Self::Failed { at, fail_count } => {
+                write!(f, "Failed(count={fail_count}, at={at:?})")
+            }
         }
+    }
+}
+
+impl ImageState {
+    pub fn failed_now(fail_count: u8) -> Self {
+        Self::Failed {
+            at: Instant::now(),
+            fail_count,
+        }
+    }
+
+    pub fn failed_permanent() -> Self {
+        Self::failed_now(FAIL_COUNT_PERMANENT)
     }
 }
 
@@ -130,6 +178,8 @@ pub struct ImageCache {
     memory_bytes: u64,
     /// URLs in the current viewport (± pad). Soft budget must not evict these.
     pinned_urls: HashSet<String>,
+    /// Failure streak + last fail time per URL (survives entry eviction / Loading).
+    fail_streak: HashMap<String, FailRecord>,
     /// Bumped on logout/login so in-flight decode results cannot repopulate the cache.
     generation: u64,
     job_tx: DecodeJobTx,
@@ -298,6 +348,7 @@ impl ImageCache {
             order: VecDeque::new(),
             memory_bytes: 0,
             pinned_urls: HashSet::new(),
+            fail_streak: HashMap::new(),
             generation: 0,
             job_tx,
             result_rx,
@@ -315,6 +366,7 @@ impl ImageCache {
         self.entries.clear();
         self.order.clear();
         self.pinned_urls.clear();
+        self.fail_streak.clear();
         self.memory_bytes = 0;
         // Drain any already-completed decode results for the old generation.
         while let Ok(result) = self.result_rx.try_recv() {
@@ -339,8 +391,11 @@ impl ImageCache {
             return false;
         }
         let state = match result.result {
-            Ok(out) => ready_state(out),
-            Err(()) => ImageState::Failed,
+            Ok(out) => {
+                self.fail_streak.remove(&result.url);
+                ready_state(out)
+            }
+            Err(()) => self.next_failed_state(&result.url),
         };
         self.insert_entry(
             result.url,
@@ -382,9 +437,13 @@ impl ImageCache {
     }
 
     /// Replace the pinned (viewport) URL set. Soft-budget eviction re-runs after unpin.
+    /// No-op when the set is unchanged (avoids thrashing on every maintain call).
     pub fn set_pinned_urls(&mut self, urls: impl IntoIterator<Item = String>) {
-        self.pinned_urls.clear();
-        self.pinned_urls.extend(urls);
+        let next: HashSet<String> = urls.into_iter().collect();
+        if next == self.pinned_urls {
+            return;
+        }
+        self.pinned_urls = next;
         self.evict_overflow(None);
     }
 
@@ -426,10 +485,28 @@ impl ImageCache {
                     self.touch(&url);
                     return false;
                 }
-                (ImageState::Failed, ImageKind::Avatar | ImageKind::Content { .. }) => {
+                // Backoff: 1s → 5s → 10s after fails 1/2/3; then stop. Permanent 404 never retries.
+                (ImageState::Failed { at, fail_count }, _) => {
+                    if !Self::failed_ready_for_retry(*fail_count, *at) {
+                        return false;
+                    }
                     self.remove_entry(&url);
                 }
-                _ => {}
+            }
+        } else if let Some(rec) = self.fail_streak.get(&url).copied() {
+            // Entry was evicted but streak remains — honour backoff / permanent stop.
+            if !Self::failed_ready_for_retry(rec.count, rec.at) {
+                self.insert_entry(
+                    url,
+                    ImageEntry {
+                        state: ImageState::Failed {
+                            at: rec.at,
+                            fail_count: rec.count,
+                        },
+                        kind,
+                    },
+                );
+                return false;
             }
         }
         if kind == ImageKind::Avatar {
@@ -437,14 +514,17 @@ impl ImageCache {
                 if let Some(entry) = disk.load(&url) {
                     return match entry {
                         AvatarDiskEntry::Bytes(bytes) => {
+                            self.fail_streak.remove(&url);
                             self.ingest_bytes(url, kind, bytes);
                             false
                         }
+                        // Discuz no-custom-avatar / true 404 — disk TTL handles expiry.
                         AvatarDiskEntry::NotFound => {
+                            self.record_fail_permanent(&url);
                             self.insert_entry(
                                 url,
                                 ImageEntry {
-                                    state: ImageState::Failed,
+                                    state: ImageState::failed_permanent(),
                                     kind,
                                 },
                             );
@@ -464,6 +544,75 @@ impl ImageCache {
         true
     }
 
+    fn failed_ready_for_retry(fail_count: u8, at: Instant) -> bool {
+        let Some(delay) = fail_retry_delay(fail_count) else {
+            return false;
+        };
+        at.elapsed() >= delay
+    }
+
+    fn record_fail_permanent(&mut self, url: &str) {
+        self.fail_streak.insert(
+            url.to_string(),
+            FailRecord {
+                count: FAIL_COUNT_PERMANENT,
+                at: Instant::now(),
+            },
+        );
+        self.prune_fail_streak();
+    }
+
+    fn prune_fail_streak(&mut self) {
+        if self.fail_streak.len() <= MAX_FAIL_STREAK_ENTRIES {
+            return;
+        }
+        // 1) Non-permanent, no live entry.
+        let mut drop_candidates: Vec<(String, Instant)> = self
+            .fail_streak
+            .iter()
+            .filter(|(url, rec)| {
+                rec.count != FAIL_COUNT_PERMANENT && !self.entries.contains_key(url.as_str())
+            })
+            .map(|(url, rec)| (url.clone(), rec.at))
+            .collect();
+        drop_candidates.sort_by_key(|(_, at)| *at);
+        for (url, _) in drop_candidates {
+            if self.fail_streak.len() <= MAX_FAIL_STREAK_ENTRIES {
+                return;
+            }
+            self.fail_streak.remove(&url);
+        }
+        // 2) Permanent 404s with no live entry (many no-avatar UIDs) — oldest first.
+        let mut permanent_orphans: Vec<(String, Instant)> = self
+            .fail_streak
+            .iter()
+            .filter(|(url, rec)| {
+                rec.count == FAIL_COUNT_PERMANENT && !self.entries.contains_key(url.as_str())
+            })
+            .map(|(url, rec)| (url.clone(), rec.at))
+            .collect();
+        permanent_orphans.sort_by_key(|(_, at)| *at);
+        for (url, _) in permanent_orphans {
+            if self.fail_streak.len() <= MAX_FAIL_STREAK_ENTRIES {
+                return;
+            }
+            self.fail_streak.remove(&url);
+        }
+        // 3) Still over: drop any remaining non-permanent (even if entry exists).
+        if self.fail_streak.len() > MAX_FAIL_STREAK_ENTRIES {
+            let extra: Vec<String> = self
+                .fail_streak
+                .iter()
+                .filter(|(_, rec)| rec.count != FAIL_COUNT_PERMANENT)
+                .map(|(url, _)| url.clone())
+                .take(self.fail_streak.len() - MAX_FAIL_STREAK_ENTRIES)
+                .collect();
+            for url in extra {
+                self.fail_streak.remove(&url);
+            }
+        }
+    }
+
     pub fn apply_fetch(&mut self, url: String, kind: ImageKind, outcome: FetchOutcome) {
         match outcome {
             FetchOutcome::Ok(bytes) => {
@@ -472,15 +621,17 @@ impl ImageCache {
                         let _ = disk.save_bytes(&url, &bytes);
                     }
                 }
+                self.fail_streak.remove(&url);
                 self.ingest_bytes(url, kind, bytes);
             }
             FetchOutcome::NotFound => {
+                // HTTP 404 — typically no custom avatar (forum falls back to noavatar.gif).
                 if kind == ImageKind::Avatar {
                     if let Some(disk) = self.avatar_disk.as_ref() {
                         let _ = disk.save_not_found(&url);
                     }
                 }
-                self.mark_failed(&url);
+                self.mark_failed_permanent(&url, kind);
             }
             FetchOutcome::Failed => self.mark_failed(&url),
         }
@@ -509,12 +660,49 @@ impl ImageCache {
         }
     }
 
+    fn next_failed_state(&mut self, url: &str) -> ImageState {
+        let rec = self.fail_streak.entry(url.to_string()).or_insert(FailRecord {
+            count: 0,
+            at: Instant::now(),
+        });
+        if rec.count != FAIL_COUNT_PERMANENT {
+            rec.count = rec.count.saturating_add(1);
+        }
+        rec.at = Instant::now();
+        let count = rec.count;
+        self.prune_fail_streak();
+        ImageState::failed_now(count)
+    }
+
     pub fn mark_failed(&mut self, url: &str) {
+        let state = self.next_failed_state(url);
         if let Some(entry) = self.entries.get_mut(url) {
             let old = entry_bytes(&entry.state);
-            entry.state = ImageState::Failed;
+            entry.state = state;
             self.memory_bytes = self.memory_bytes.saturating_sub(old);
             self.touch(url);
+        } else {
+            // No entry (evicted mid-flight) — keep fail_streak for backoff on next request.
+            let _ = state;
+        }
+    }
+
+    pub fn mark_failed_permanent(&mut self, url: &str, kind: ImageKind) {
+        self.record_fail_permanent(url);
+        if let Some(entry) = self.entries.get_mut(url) {
+            let old = entry_bytes(&entry.state);
+            entry.state = ImageState::failed_permanent();
+            entry.kind = kind;
+            self.memory_bytes = self.memory_bytes.saturating_sub(old);
+            self.touch(url);
+        } else {
+            self.insert_entry(
+                url.to_string(),
+                ImageEntry {
+                    state: ImageState::failed_permanent(),
+                    kind,
+                },
+            );
         }
     }
 
@@ -602,7 +790,7 @@ impl ImageCache {
         }
         self.entries
             .get(url)
-            .is_some_and(|e| matches!(e.state, ImageState::Ready { .. } | ImageState::Failed))
+            .is_some_and(|e| matches!(e.state, ImageState::Ready { .. } | ImageState::Failed { .. }))
     }
 
     fn pick_hard_eviction_victim(&self, protect: Option<&str>) -> Option<String> {
@@ -671,7 +859,7 @@ fn avatar_dimensions_match(width: u16, height: u16) -> bool {
 
 fn entry_bytes(state: &ImageState) -> u64 {
     match state {
-        ImageState::Loading | ImageState::Failed => 0,
+        ImageState::Loading | ImageState::Failed { .. } => 0,
         ImageState::Ready {
             estimated_bytes, ..
         } => *estimated_bytes,
@@ -872,8 +1060,133 @@ mod tests {
         cache.mark_failed("http://example.com/x.png");
         assert!(matches!(
             cache.get("http://example.com/x.png").map(|e| &e.state),
-            Some(ImageState::Failed)
+            Some(ImageState::Failed { .. })
         ));
+    }
+
+    #[test]
+    fn failed_avatar_backoff_1s_5s_10s_then_stop() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/cool.png".to_string();
+        assert!(cache.request(url.clone(), ImageKind::Avatar));
+        cache.mark_failed(&url);
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed {
+                fail_count: 1,
+                ..
+            })
+        ));
+        // Immediate re-request blocked (1s backoff).
+        assert!(!cache.request(url.clone(), ImageKind::Avatar));
+        // After 1s: allow 1st retry.
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(1) - Duration::from_millis(1),
+                fail_count: 1,
+            };
+        }
+        assert!(cache.request(url.clone(), ImageKind::Avatar));
+        cache.mark_failed(&url);
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed {
+                fail_count: 2,
+                ..
+            })
+        ));
+        assert!(!cache.request(url.clone(), ImageKind::Avatar));
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(5) - Duration::from_millis(1),
+                fail_count: 2,
+            };
+        }
+        assert!(cache.request(url.clone(), ImageKind::Avatar));
+        cache.mark_failed(&url);
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed {
+                fail_count: 3,
+                ..
+            })
+        ));
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(10) - Duration::from_millis(1),
+                fail_count: 3,
+            };
+        }
+        assert!(cache.request(url.clone(), ImageKind::Avatar));
+        cache.mark_failed(&url);
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed {
+                fail_count: 4,
+                ..
+            })
+        ));
+        // 4th failure: no more retries even if time passes.
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(60),
+                fail_count: 4,
+            };
+        }
+        assert!(!cache.request(url.clone(), ImageKind::Avatar));
+    }
+
+    #[test]
+    fn permanent_not_found_never_retries() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/noavatar.png".to_string();
+        cache.request(url.clone(), ImageKind::Avatar);
+        cache.mark_failed_permanent(&url, ImageKind::Avatar);
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(60),
+                fail_count: FAIL_COUNT_PERMANENT,
+            };
+        }
+        assert!(!cache.request(url.clone(), ImageKind::Avatar));
+        // Even after hard eviction, permanent streak must block HTTP.
+        cache.remove_entry(&url);
+        assert!(!cache.request(url, ImageKind::Avatar));
+    }
+
+    #[test]
+    fn fail_backoff_survives_entry_eviction() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/evicted.png".to_string();
+        assert!(cache.request(url.clone(), ImageKind::Avatar));
+        cache.mark_failed(&url);
+        // Simulate soft/hard eviction of the Failed entry.
+        cache.remove_entry(&url);
+        assert!(cache.get(&url).is_none());
+        // Miss path must still honour 1s backoff — no immediate storm.
+        assert!(!cache.request(url.clone(), ImageKind::Avatar));
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed {
+                fail_count: 1,
+                ..
+            })
+        ));
+        // After delay, retry is allowed again.
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(1) - Duration::from_millis(1),
+                fail_count: 1,
+            };
+        }
+        cache.fail_streak.insert(
+            url.clone(),
+            FailRecord {
+                count: 1,
+                at: Instant::now() - Duration::from_secs(1) - Duration::from_millis(1),
+            },
+        );
+        assert!(cache.request(url, ImageKind::Avatar));
     }
 
     #[test]
@@ -923,7 +1236,7 @@ mod tests {
         assert!(applied);
         assert!(matches!(
             cache.get(&url).map(|e| &e.state),
-            Some(ImageState::Failed)
+            Some(ImageState::Failed { .. })
         ));
     }
 
@@ -961,6 +1274,16 @@ mod tests {
         let url = "http://example.com/post.jpg".to_string();
         cache.request(url.clone(), ImageKind::Content { max_cols: 40 });
         cache.mark_failed(&url);
+        assert!(
+            !cache.request(url.clone(), ImageKind::Content { max_cols: 40 }),
+            "within 1s backoff must not re-fetch"
+        );
+        if let Some(entry) = cache.entries.get_mut(&url) {
+            entry.state = ImageState::Failed {
+                at: Instant::now() - Duration::from_secs(1) - Duration::from_millis(1),
+                fail_count: 1,
+            };
+        }
         assert!(cache.request(url.clone(), ImageKind::Content { max_cols: 40 }));
         assert!(matches!(
             cache.get(&url).map(|e| &e.state),
@@ -977,7 +1300,7 @@ mod tests {
             cache.insert_entry(
                 url,
                 ImageEntry {
-                    state: ImageState::Failed,
+                    state: ImageState::failed_now(1),
                     kind: ImageKind::Smiley,
                 },
             );
