@@ -207,15 +207,31 @@ pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSend
             return;
         }
         "logout" => {
-            // Drop auto-login credentials, clear worker cookie jar + session file, then UI.
-            let _ = crate::config::clear_credentials(&app.credentials_path);
-            let _ = worker_tx.send(WorkerRequest::Logout);
+            // Clear local creds + worker session. Never show bare "已登出" over an error.
+            let local_err = crate::config::clear_credentials(&app.credentials_path)
+                .err()
+                .map(|e| format!("清除本地凭证失败: {e}"));
+            app.bump_session_epoch();
+            let send_ok = worker_tx.send(WorkerRequest::Logout).is_ok();
             app.session.logged_in = false;
             app.session.username = None;
             app.session.uid = None;
             app.unread = crate::app::UnreadState::default();
             app.page = Page::Login;
-            app.set_toast("已登出", false);
+            app.logout_local_error = local_err.clone();
+            if send_ok {
+                // Final toast comes from LoggedOut (or retains local error if any).
+                app.logout_pending = true;
+                if let Some(msg) = local_err {
+                    app.set_toast(msg, true);
+                }
+            } else if let Some(msg) = local_err {
+                app.logout_pending = false;
+                app.set_toast(format!("{msg}；且无法请求后台清理会话"), true);
+            } else {
+                app.logout_pending = false;
+                app.set_toast("已登出，但无法请求后台清理会话", true);
+            }
         }
         "pm" => open_page(app, Page::PmList, worker_tx),
         "notif" => open_page(app, Page::Notifications, worker_tx),
@@ -556,7 +572,7 @@ fn refresh_current_page(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerR
                     .as_ref()
                     .map(|d| d.page.max(1))
                     .unwrap_or(1),
-                crate::app::DetailFetchMode::Replace,
+                crate::app::DetailLoadIntent::ReplaceTop,
             );
         }
         Page::PmThread => {

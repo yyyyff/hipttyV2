@@ -21,6 +21,14 @@ use crate::mouse::install_scroll_chrome;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
+    // Pin set is only meaningful on ThreadDetail. Global Esc/b uses navigate_back() and
+    // never hits handle_detail_key's clear_pinned — drop pins here so Feed avatars etc.
+    // are not starved by soft-budget eviction of orphan pinned detail images.
+    if app.page != Page::ThreadDetail {
+        if let Some(cache) = app.images_mut() {
+            cache.clear_pinned();
+        }
+    }
     // Decode completion changes content heights; re-anchor mid-floor scroll, not floor tops.
     // Capture uses cached FloorLayout (cheap); only rebuild after poll reports changes.
     let scroll_anchor = if app.page == Page::ThreadDetail {

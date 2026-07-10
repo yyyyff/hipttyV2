@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use hiptty_core::{AdapterError, AppSettings, StoredCredentials};
@@ -14,6 +14,13 @@ pub fn settings_path(config_dir: &Path) -> PathBuf {
 }
 
 pub fn credentials_path(config_dir: &Path, profile: &str) -> PathBuf {
+    // Prefer validated names; fall back to "default" only for path construction after
+    // DiscuzClient::new already rejected invalid profiles at process start.
+    let profile = if hiptty_adapter::session::validate_profile(profile).is_ok() {
+        profile
+    } else {
+        "default"
+    };
     config_dir.join(format!("{profile}.credentials.json"))
 }
 
@@ -52,10 +59,40 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), AdapterError> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
     }
-    let file = File::create(path).map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
-    serde_json::to_writer_pretty(BufWriter::new(file), value)
-        .map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
+    // Atomic write into the same directory to avoid truncated credentials on crash.
+    let tmp = path.with_extension("json.tmp");
+    {
+        let file = create_private_file(&tmp)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, value)
+            .map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
+        // Explicit flush: Drop of BufWriter can swallow the final write error.
+        writer
+            .flush()
+            .map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
+    }
+    restrict_permissions(&tmp)?;
+    fs::rename(&tmp, path).map_err(|e| AdapterError::InvalidInput(e.to_string()))?;
     restrict_permissions(path)
+}
+
+fn create_private_file(path: &Path) -> Result<File, AdapterError> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| AdapterError::InvalidInput(e.to_string()))
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(path).map_err(|e| AdapterError::InvalidInput(e.to_string()))
+    }
 }
 
 #[cfg(unix)]

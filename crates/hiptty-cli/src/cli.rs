@@ -5,7 +5,7 @@ use hiptty_core::PostAction;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "hiptty",
+    name = "hiptty-cli",
     version,
     about = "Headless 4d4y forum client (agent-ready)",
     long_about = None

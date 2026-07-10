@@ -1,7 +1,7 @@
 # TUI 实施决策记录
 
-**日期**: 2026-07-02（持续更新）  
-**作用**: 记录 TUI 相关决策、技术备注与待补充项，供跨 session 衔接。本文档可能滞后；与代码或其他说法冲突时，停下来列清差异，等人决定后再继续。  
+**日期**: 2026-07-02（持续更新）
+**作用**: 记录 TUI 相关决策、技术备注与待补充项，供跨 session 衔接。本文档可能滞后；与代码或其他说法冲突时，停下来列清差异，等人决定后再继续。
 **§1「偏离」**: 相对已归档的初版设计稿（[`archive/tui-design.md`](./archive/tui-design.md)）而言；未读过设计稿时，直接看代码即可。
 
 ---
@@ -40,10 +40,10 @@
 ## 3. 明确不做（本阶段）
 
 - Feed ↔ Detail 横向滑动切换
-- 详情 `j`/`k` 逐行滚动（半屏滚动为避免大图残留，保持现状）  
+- 详情 `j`/`k` 逐行滚动（半屏滚动为避免大图残留，保持现状）
 - 详情页 `#` 跳楼层、`Enter` 引用跳转、`o` 打开附件/链接
-- 投票块排版与高亮（延后）  
-- 楼层头部/间距/竖线动画等视觉微调  
+- 投票块排版与高亮（延后）
+- 楼层头部/间距/竖线动画等视觉微调
 - ~~全量 prefetch 改视口懒加载~~（2026-07-09：详情图已做视口 ±1 + 并发 3）
 - 恢复 `erase_graphics_guard_band` 每帧擦洗（见 §4）
 
@@ -53,44 +53,51 @@
 
 ### 4.1 `erase_graphics_guard_band`（已废弃）
 
-- **目的**: Windows Terminal + Kitty 图层渗入 Status Bar 区域时，每帧擦洗内容区底部 N 行。  
-- **现状**: 调用已移除；函数保留但**不得**重新接入 draw 循环。  
-- **与残留修复的关系**: 与当前 placement 同步清理方案冲突，会加剧鬼影。  
+- **目的**: Windows Terminal + Kitty 图层渗入 Status Bar 区域时，每帧擦洗内容区底部 N 行。
+- **现状**: 调用已移除；函数保留但**不得**重新接入 draw 循环。
+- **与残留修复的关系**: 与当前 placement 同步清理方案冲突，会加剧鬼影。
 - **与 Sixel 末行滚动无关**。
 
 ### 4.2 Sixel 末行滚动（ratatui-image [#57](https://github.com/ratatui/ratatui-image/issues/57)）
 
-- **问题**: Sixel 画到视口/终端最末一行时，部分终端会误触发向上滚动。  
-- **修复**: `hiptty_image::graphics_bottom_margin` — 按**实际绘制协议**在视口底部保留 1 行：  
-  - `ProtocolType::Sixel` → 1 行  
-  - `ProtocolType::Kitty` → 1 行（mdfried 模型，避免图层压住底栏）  
-  - Windows Terminal 上 `ImageKind::Content` 强制按 Sixel 计边距（与 `cache.rs` 解码协议一致）  
+- **问题**: Sixel 画到视口/终端最末一行时，部分终端会误触发向上滚动。
+- **修复**: `hiptty_image::graphics_bottom_margin` — 按**实际绘制协议**在视口底部保留 1 行：
+  - `ProtocolType::Sixel` → 1 行
+  - `ProtocolType::Kitty` → 1 行（mdfried 模型，避免图层压住底栏）
+  - Windows Terminal 上 `ImageKind::Content` 强制按 Sixel 计边距（与 `cache.rs` 解码协议一致）
 - **实现位置**: `draw_graphic_in_viewport`、`floor_list::render_image_block` 裁剪高度。
 
 ### 4.3 残留 / 性能
 
-- **WT 详情大图滚动溢出（2026-07-09）**: 帖子 Content 图在 WT 上走 Sixel + `SlicedImage`。当图同时被上裁（`skip>0`）与下裁（`drop>0`）时，上游 `ratatui-image` 11.0.6 的 `SlicedSixelData::bands` 按 `(height - drop)` 取 band，**未扣 skip**，Sixel 序列比 `image_area` 更高，像素溢出进 Status Bar，再滚形成残图。仅上裁或仅下裁、或图完整入屏时不复现。  
-  - **修复**: `[patch.crates-io]` → `vendor/ratatui-image`（基于 11.0.6），见 `vendor/ratatui-image/PATCHES.md`。  
-  - 与 §4.1 guard band、Kitty placement 清理是不同路径；勿用每帧 guard band 顶替。  
-- **图片缓存**: Content/Avatar/Smiley 均为进程内 `ImageCache` 内存缓存（decode + 协议数据）。同会话再进帖不会再占位；**无** Content 磁盘缓存。Avatar 另有 `AvatarDiskCache`。  
-  - 内存：最多 `MAX_MEMORY_ENTRIES`（256）条；溢出时淘汰非 `Loading` 的最旧条目。  
-  - 磁盘头像：启动/`new` 时 `purge`（按 TTL 清理 + 总文件数/字节预算）。  
-  - 下载：`get_bytes` 仅 http(s)，`Content-Length`/流式均硬限 8 MiB；解码侧限边长与像素数。  
-- **详情图片性能（2026-07-09，2026-07-10 修正）**:  
-  - 视口懒加载：只 prefetch 可见楼层 ±1，滚动时再补；HTTP 并发上限 3。  
-  - **真并发**：`FetchImage` 在 worker 内 `tokio::spawn`（与页面加载/发帖串行队列解耦）；此前「并发 3」只是入队深度，实际仍串行。  
-  - 解码线程池：2–4 worker（非单线程）。  
-  - Loading 占位高度按 `max_cols/2` 估（8–20），宽度用满内容列，减轻撑开。  
-  - 滚动保持：decode 前后用 `(floor, offset_in_floor)` 锚点，禁止吸附楼顶（修「图未出完就滚再弹回」）。  
-- **详情布局缓存（2026-07-10）**:  
-  - 此前每 50ms 帧对**全部**楼层重复 `layout_post_blocks`/换行（`floor_list_total_height` + scroll anchor + `draw_floor_list` 各扫一遍）；1000 楼仅计算即可 ~48ms，逼近帧预算。  
-  - 现：`FloorLayout` 单次构建 heights/offsets/total，缓存在 `DetailState::layout`；宽变/帖变/图片 decode 完成时失效。  
-  - 绘制用缓存高度 O(1) 跳到首可见楼，仅对可见楼再 `layout_post_blocks` 出画。  
-- **Kitty placement 清理（2026-07-09）**:  
-  - `clear_content_viewport` / `clear_graphics_in_area` **仍每帧** `clear_rect` + `fill_area_spaces`（Sixel/格子覆盖）。  
-  - Kitty `d=y`（`clear_terminal_placements_in_area`）**仅在 geometry dirty 时**发送：scroll / 翻页 / resize / 图 decode / 首帧。由 `begin_frame_graphics` + `App::graphics_dirty` 控制。  
-  - WT 上 Content 走 Sixel，每帧 `d=y` 主要服务头像/表情 Kitty 层；空闲 tick 不再刷屏。  
-  - `d=y` 序列改为单次 write 批处理。  
+- **WT 详情大图滚动溢出（2026-07-09）**: 帖子 Content 图在 WT 上走 Sixel + `SlicedImage`。当图同时被上裁（`skip>0`）与下裁（`drop>0`）时，上游 `ratatui-image` 11.0.6 的 `SlicedSixelData::bands` 按 `(height - drop)` 取 band，**未扣 skip**，Sixel 序列比 `image_area` 更高，像素溢出进 Status Bar，再滚形成残图。仅上裁或仅下裁、或图完整入屏时不复现。
+  - **修复**: `[patch.crates-io]` → `vendor/ratatui-image`（基于 11.0.6），见 `vendor/ratatui-image/PATCHES.md`。
+  - 与 §4.1 guard band、Kitty placement 清理是不同路径；勿用每帧 guard band 顶替。
+- **图片缓存**: Content/Avatar/Smiley 均为进程内 `ImageCache` 内存缓存（decode + 协议数据）。同会话再进帖不会再占位；**无** Content 磁盘缓存。Avatar 另有 `AvatarDiskCache`。
+  - 内存：最多 256 条（硬）+ Ready 渲染像素估值软预算 128 MiB；视口 ±pad **pin** 不可被软预算淘汰；刚插入的 Ready 自我保护。解码队列另限 16 job / 16 MiB。
+  - 磁盘头像：启动时 `purge` + 重计；运行期维护 `file_count`/`total_bytes`，高水位（1800 文件或 64 MiB）触发清理到低水位（1600 / 48 MiB），每 32 次写入也 opportunistically 检查。
+  - 下载：`get_bytes` 用无 cookie_provider 客户端，仅附加 Cookie **快照**（登录附件可读，Set-Cookie 不回写 jar）；硬限 8 MiB。
+- **详情图片性能（2026-07-09，2026-07-10 修正）**:
+  - 视口懒加载：只 prefetch 可见楼层 ±1，滚动时再补；HTTP 并发上限 3。
+  - **真并发**：`FetchImage` 在 worker 内 `tokio::spawn`（与页面加载/发帖串行队列解耦）；此前「并发 3」只是入队深度，实际仍串行。
+  - 解码线程池：2–4 worker（非单线程）。
+  - Loading 占位高度按 `max_cols/2` 估（8–20），宽度用满内容列，减轻撑开。
+  - 滚动保持：decode 前后用 `(floor, offset_in_floor)` 锚点，禁止吸附楼顶（修「图未出完就滚再弹回」）。
+- **详情布局缓存（2026-07-10）**:
+  - 此前每 50ms 帧对**全部**楼层重复 `layout_post_blocks`/换行（`floor_list_total_height` + scroll anchor + `draw_floor_list` 各扫一遍）；1000 楼仅计算即可 ~48ms，逼近帧预算。
+  - 现：`FloorLayout` 单次构建 heights/offsets/total，缓存在 `DetailState::layout`；宽变/帖变/图片 decode 完成时失效。
+  - 绘制用缓存高度 O(log n) 二分跳到首可见楼，仅对可见楼再 `layout_post_blocks` 出画。
+- **详情加载意图 / g·G / layout_revision（2026-07-10）**:
+  - `DetailLoadIntent::{ReplaceTop, ReplaceBottom, AppendPreserve, PrependPreserve}` + `request_id` 丢弃过期响应。
+  - `layout_revision`：同宽同帖数换页也会重建布局（修复 G 复用第一页高度）。
+  - `G` → 最后一页后 `selected=last` + `max_scroll`；`g` → 首页顶。
+  - 仅加载末页后上滚：`loaded_page_lo` + `PrependPreserve` 向前拼页并平移 scroll，避免卡在末页第一楼。
+  - 图片 `get_bytes` 使用无 cookie 客户端；JPEG 解码不再绕过 Limits；解码队列有界。
+
+- **Kitty placement 清理（2026-07-09）**:
+  - `clear_content_viewport` / `clear_graphics_in_area` **仍每帧** `clear_rect` + `fill_area_spaces`（Sixel/格子覆盖）。
+  - Kitty `d=y`（`clear_terminal_placements_in_area`）**仅在 geometry dirty 时**发送：scroll / 翻页 / resize / 图 decode / 首帧。由 `begin_frame_graphics` + `App::graphics_dirty` 控制。
+  - WT 上 Content 走 Sixel，每帧 `d=y` 主要服务头像/表情 Kitty 层；空闲 tick 不再刷屏。
+  - `d=y` 序列改为单次 write 批处理。
   - **`erase_graphics_guard_band` 仍废弃**，不重新接入。
 
 ---

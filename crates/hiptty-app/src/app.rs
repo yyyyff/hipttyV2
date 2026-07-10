@@ -60,13 +60,33 @@ fn list_item_height(page: Page) -> u16 {
     }
 }
 
-/// How the next `ThreadDetailLoaded` response should merge into state.
+/// How the next `ThreadDetailLoaded` response should merge into state and place the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailLoadIntent {
+    /// Replace posts and jump to the first floor (open thread, `g`, refresh page 1).
+    ReplaceTop,
+    /// Replace posts and jump to the last floor / max scroll (`G`).
+    ReplaceBottom,
+    /// Append next page posts and preserve the mid-floor scroll anchor (near-end auto load).
+    AppendPreserve,
+    /// Prepend previous page posts and keep the viewport on the same floors (near-top after `G`).
+    PrependPreserve,
+}
+
+/// Backward-compatible alias used by a few call sites during the intent migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailFetchMode {
-    /// Replace `posts` (open thread, `g`, or `G`).
     Replace,
-    /// Append `posts` when scrolling near the end of the current page.
     Append,
+}
+
+impl From<DetailFetchMode> for DetailLoadIntent {
+    fn from(mode: DetailFetchMode) -> Self {
+        match mode {
+            DetailFetchMode::Replace => Self::ReplaceTop,
+            DetailFetchMode::Append => Self::AppendPreserve,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,10 +192,19 @@ pub struct DetailState {
     pub scroll_top: u32,
     pub loading: bool,
     pub loading_more: bool,
-    pub pending_fetch: Option<DetailFetchMode>,
+    /// Intent for the in-flight detail request (paired with [`Self::pending_request_id`]).
+    pub pending_intent: Option<DetailLoadIntent>,
+    /// Monotonic id of the latest detail request; stale responses are dropped.
+    pub pending_request_id: u64,
+    /// Next request id to allocate.
+    pub next_request_id: u64,
+    /// Lowest page number currently held in `detail.posts` (for upward prepend after `G`).
+    /// Highest is `detail.page`.
+    pub loaded_page_lo: u32,
     pub error: Option<String>,
-    /// Cached floor heights/offsets for the current posts + width + image states.
-    /// Invalidated when posts change, terminal width changes, or images decode.
+    /// Bumped when posts change or layout must rebuild (image heights, etc.).
+    pub layout_revision: u64,
+    /// Cached floor heights/offsets. Matched by `width` + [`Self::layout_revision`].
     pub layout: Option<FloorLayout>,
 }
 
@@ -192,14 +221,26 @@ impl DetailState {
             scroll_top: 0,
             loading: false,
             loading_more: false,
-            pending_fetch: None,
+            pending_intent: None,
+            pending_request_id: 0,
+            next_request_id: 1,
+            loaded_page_lo: 1,
             error: None,
+            layout_revision: 0,
             layout: None,
         }
     }
 
     pub fn invalidate_layout(&mut self) {
+        self.layout_revision = self.layout_revision.wrapping_add(1);
         self.layout = None;
+    }
+
+    pub fn allocate_request_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        self.pending_request_id = id;
+        id
     }
 }
 
@@ -254,6 +295,12 @@ pub struct App {
     pub image_fetch_queue: std::collections::VecDeque<FetchRequest>,
     /// In-flight `FetchImage` worker requests.
     pub image_fetches_in_flight: usize,
+    /// Bumped on login/logout so in-flight image responses cannot apply to a new session.
+    pub session_epoch: u64,
+    /// Waiting for worker `LoggedOut` to confirm cookie/session cleanup.
+    pub logout_pending: bool,
+    /// Local credential-clear error retained so worker success cannot paint over it.
+    pub logout_local_error: Option<String>,
     /// Next frame should emit Kitty placement deletes (scroll / layout / image ready).
     pub graphics_dirty: bool,
     /// Last geometry key for which we already issued a placement clear.
@@ -298,8 +345,12 @@ impl App {
                 scroll_top: 0,
                 loading: false,
                 loading_more: false,
-                pending_fetch: None,
+                pending_intent: None,
+                pending_request_id: 0,
+                next_request_id: 1,
+                loaded_page_lo: 1,
                 error: None,
+                layout_revision: 0,
                 layout: None,
             },
             forum_picker_selected: 0,
@@ -327,6 +378,9 @@ impl App {
             image_cache: None,
             image_fetch_queue: std::collections::VecDeque::new(),
             image_fetches_in_flight: 0,
+            session_epoch: 0,
+            logout_pending: false,
+            logout_local_error: None,
             graphics_dirty: true,
             last_graphics_layout: None,
             scroll_chrome: None,
@@ -412,6 +466,7 @@ impl App {
                 .send(WorkerRequest::FetchImage {
                     url: req.url,
                     kind: req.kind,
+                    session_epoch: self.session_epoch,
                 })
                 .is_ok()
             {
@@ -420,6 +475,13 @@ impl App {
                 break;
             }
         }
+    }
+
+    /// Invalidate in-flight image work after logout/login (cookie jar may have changed).
+    pub fn bump_session_epoch(&mut self) {
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.image_fetch_queue.clear();
+        // In-flight responses still decrement `image_fetches_in_flight` when they arrive.
     }
 
     pub fn palette(&self) -> Palette {
@@ -745,9 +807,10 @@ impl App {
         self.detail.invalidate_layout();
     }
 
-    /// Ensure [`DetailState::layout`] matches current posts, content width, and image heights.
+    /// Ensure [`DetailState::layout`] matches current posts, content width, revision, and image heights.
     pub fn ensure_detail_layout(&mut self) {
         let width = self.content_width();
+        let revision = self.detail.layout_revision;
         let post_count = self
             .detail
             .detail
@@ -762,7 +825,7 @@ impl App {
             .detail
             .layout
             .as_ref()
-            .is_some_and(|l| l.matches(width, post_count))
+            .is_some_and(|l| l.matches(width, revision))
         {
             return;
         }
@@ -774,7 +837,43 @@ impl App {
             .as_ref()
             .map(|d| d.posts.as_slice())
             .unwrap_or(&[]);
-        self.detail.layout = Some(FloorLayout::build(posts, width, palette, images));
+        self.detail.layout = Some(FloorLayout::build(posts, width, palette, images, revision));
+    }
+
+    /// Select the last floor and scroll to the document bottom.
+    pub fn scroll_detail_to_bottom(&mut self) {
+        let viewport = self.scroll_viewport_height();
+        let n = self
+            .detail
+            .detail
+            .as_ref()
+            .map(|d| d.posts.len())
+            .unwrap_or(0);
+        if n == 0 {
+            self.detail.selected = 0;
+            self.detail.scroll_top = 0;
+            return;
+        }
+        self.detail.selected = n - 1;
+        let Some(layout) = self.detail_layout() else {
+            return;
+        };
+        self.detail.scroll_top = layout.max_scroll(viewport);
+    }
+
+    /// Clamp selected index into the current posts range.
+    pub fn clamp_detail_selected(&mut self) {
+        let n = self
+            .detail
+            .detail
+            .as_ref()
+            .map(|d| d.posts.len())
+            .unwrap_or(0);
+        if n == 0 {
+            self.detail.selected = 0;
+        } else {
+            self.detail.selected = self.detail.selected.min(n - 1);
+        }
     }
 
     /// Borrow the cached layout, rebuilding if stale.
@@ -887,6 +986,7 @@ impl App {
             security_answer: answer,
         };
         let _ = crate::config::save_credentials(&self.credentials_path, &stored);
+        self.bump_session_epoch();
         self.session.username = Some(username);
         self.session.logged_in = true;
         self.login.loading = false;

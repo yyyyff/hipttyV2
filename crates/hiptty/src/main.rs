@@ -2,7 +2,7 @@ use clap::Parser;
 use hiptty_adapter::DiscuzClient;
 use hiptty_app::{config_dir, load_settings, run, App};
 #[derive(Debug, Parser)]
-#[command(name = "hiptty", about = "4d4y forum terminal client")]
+#[command(name = "hiptty", version, about = "4d4y forum terminal client")]
 struct Cli {
     /// Config directory override (default: ~/.config/hiptty)
     #[arg(long, env = "HIPTTY_CONFIG")]

@@ -25,6 +25,7 @@ pub struct DiscuzClient {
 
 impl DiscuzClient {
     pub fn new(config_dir: Option<&std::path::Path>, profile: &str) -> AdapterResult<Self> {
+        session::validate_profile(profile)?;
         let config_dir = session::config_dir(config_dir)?;
         session::migrate_legacy_session(&config_dir, profile)?;
         let session_path = session::session_path(&config_dir, profile);

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hiptty_core::AdapterError;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
-use reqwest::{Client, Response};
+use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
+use reqwest::{Client, Response, Url};
 use reqwest_cookie_store::CookieStoreMutex;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,11 @@ pub const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct HttpClient {
+    /// Session-aware client (login, threads, posts). Set-Cookie updates the jar.
     inner: Client,
+    /// No cookie_provider: image fetches attach a Cookie *snapshot* header only, so
+    /// Set-Cookie on the response cannot revive or pollute the session jar.
+    bare: Client,
     pub cookie_store: Arc<CookieStoreMutex>,
 }
 
@@ -29,6 +33,14 @@ impl HttpClient {
 
         let inner = Client::builder()
             .cookie_provider(Arc::clone(&cookie_store))
+            .default_headers(headers.clone())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(READ_TIMEOUT)
+            .build()
+            .map_err(|e| AdapterError::Network(e.to_string()))?;
+
+        // No cookie_provider: image CDN traffic must not revive or pollute sessions.
+        let bare = Client::builder()
             .default_headers(headers)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(READ_TIMEOUT)
@@ -37,6 +49,7 @@ impl HttpClient {
 
         Ok(Self {
             inner,
+            bare,
             cookie_store,
         })
     }
@@ -62,9 +75,14 @@ impl HttpClient {
 
     pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AdapterError> {
         validate_http_url(url)?;
-        let response = self
-            .inner
-            .get(url)
+        // Snapshot cookies for auth-gated attachments, but never feed Set-Cookie back.
+        let mut req = self.bare.get(url);
+        if let Some(cookie) = cookie_header_snapshot(&self.cookie_store, url) {
+            if let Ok(val) = HeaderValue::from_str(&cookie) {
+                req = req.header(COOKIE, val);
+            }
+        }
+        let response = req
             .send()
             .await
             .map_err(|e| AdapterError::Network(e.to_string()))?;
@@ -243,6 +261,22 @@ fn validate_http_url(url: &str) -> Result<(), AdapterError> {
         Err(AdapterError::InvalidInput(format!(
             "unsupported image URL scheme (need http/https): {url}"
         )))
+    }
+}
+
+/// Build a `Cookie` header from the current jar without installing a cookie_provider
+/// (so response Set-Cookie cannot mutate the session).
+fn cookie_header_snapshot(store: &CookieStoreMutex, url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let guard = store.lock().ok()?;
+    let pairs: Vec<String> = guard
+        .get_request_values(&parsed)
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs.join("; "))
     }
 }
 

@@ -16,7 +16,8 @@ const MAX_DIMENSION: u32 = 2560;
 const JPEG_QUALITY: u8 = 80;
 
 static IMAGE_PATH_CANDIDATE: LazyLock<Regex> = LazyLock::new(|| {
-    let ext = r"(?:jpg|jpeg|png|gif|webp|bmp|heic|heif)";
+    // HEIC/HEIF intentionally omitted: current `image` features cannot decode them.
+    let ext = r"(?:jpg|jpeg|png|gif|webp|bmp)";
     Regex::new(&format!(
         r#"(?i)(/[^\s\[\]<>{{}}"'，。！？；：、]+\.{ext}|(?:[\w\-\.%+@]+/)+[\w\-\.]+\.{ext}|"[^"]+\.{ext}"|'[^']+\.{ext}')"#
     ))
@@ -24,14 +25,14 @@ static IMAGE_PATH_CANDIDATE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static IMAGE_URL_CANDIDATE: LazyLock<Regex> = LazyLock::new(|| {
-    let ext = r"(?:jpg|jpeg|png|gif|webp|bmp|heic|heif)";
+    let ext = r"(?:jpg|jpeg|png|gif|webp|bmp)";
     Regex::new(&format!(
         r#"(?i)https?://[^\s\[\]<>{{}}"'，。！？；：、]+\.{ext}(?:\?[^\s\[\]<>{{}}"'，。！？；：、]*)?"#
     ))
     .expect("valid image url candidate regex")
 });
 
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif"];
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp"];
 
 /// Content after replacing local image paths, plus attach IDs for `attachnew[][description]`.
 #[derive(Debug, Clone, PartialEq, Eq)]

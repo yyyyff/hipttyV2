@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{
     mpsc::{self, Receiver},
@@ -54,6 +54,8 @@ pub enum ImageState {
         draw: ReadyDraw,
         width: u16,
         height: u16,
+        /// Byte cost charged against the soft Ready budget (pixel-based estimate at decode).
+        estimated_bytes: u64,
     },
     Failed,
 }
@@ -62,7 +64,12 @@ impl std::fmt::Debug for ImageState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Loading => write!(f, "Loading"),
-            Self::Ready { width, height, .. } => write!(f, "Ready({width}x{height})"),
+            Self::Ready {
+                width,
+                height,
+                estimated_bytes,
+                ..
+            } => write!(f, "Ready({width}x{height},~{estimated_bytes}B)"),
             Self::Failed => write!(f, "Failed"),
         }
     }
@@ -89,11 +96,21 @@ struct DecodeResult {
 struct DecodeOutput {
     draw: ReadyDraw,
     size: Size,
+    estimated_bytes: u64,
 }
 
 /// Cap in-memory decoded images (protocol payloads are heavy). FIFO among
 /// non-`Loading` entries so long browsing sessions stay bounded.
 pub const MAX_MEMORY_ENTRIES: usize = 256;
+/// Soft byte budget for Ready protocol payloads (render-pixel estimate). Complements entry count.
+/// Not a hard OOM bound: pinned / just-inserted Ready may temporarily exceed it.
+/// Decode-queue compressed bytes are capped separately by [`MAX_DECODE_QUEUE_BYTES`].
+pub const MAX_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Max decode jobs waiting (compressed bytes still held in RAM).
+pub const MAX_DECODE_QUEUE_JOBS: usize = 16;
+/// Soft cap on compressed bytes sitting in the decode queue (~2× max download).
+pub const MAX_DECODE_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Reject decompression bombs / absurd pixel grids after decode.
 pub const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024; // 16 MP
@@ -106,6 +123,10 @@ pub struct ImageCache {
     entries: HashMap<String, ImageEntry>,
     /// Insertion/access order for eviction (oldest at front).
     order: VecDeque<String>,
+    /// Sum of Ready `estimated_bytes` currently held.
+    memory_bytes: u64,
+    /// URLs in the current viewport (± pad). Soft budget must not evict these.
+    pinned_urls: HashSet<String>,
     job_tx: DecodeJobTx,
     result_rx: Receiver<DecodeResult>,
 }
@@ -114,6 +135,8 @@ impl std::fmt::Debug for ImageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImageCache")
             .field("entries", &self.entries.len())
+            .field("memory_bytes", &self.memory_bytes)
+            .field("pinned", &self.pinned_urls.len())
             .finish()
     }
 }
@@ -129,6 +152,8 @@ fn decode_worker_count() -> usize {
 
 struct DecodeQueue {
     jobs: Mutex<VecDeque<DecodeJob>>,
+    /// Total compressed bytes currently queued (for budget).
+    queued_bytes: Mutex<usize>,
     cvar: Condvar,
     closed: Mutex<bool>,
 }
@@ -137,21 +162,32 @@ impl DecodeQueue {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             jobs: Mutex::new(VecDeque::new()),
+            queued_bytes: Mutex::new(0),
             cvar: Condvar::new(),
             closed: Mutex::new(false),
         })
     }
 
-    fn push(&self, job: DecodeJob) {
+    /// Push a job. Returns the job if the queue is over budget (caller marks Failed).
+    fn push(&self, job: DecodeJob) -> Option<DecodeJob> {
         let mut q = self.jobs.lock().expect("decode queue lock");
+        let mut bytes = self.queued_bytes.lock().expect("decode bytes lock");
+        let job_len = job.bytes.len();
+        if q.len() >= MAX_DECODE_QUEUE_JOBS || *bytes + job_len > MAX_DECODE_QUEUE_BYTES {
+            return Some(job);
+        }
+        *bytes = bytes.saturating_add(job_len);
         q.push_back(job);
         self.cvar.notify_one();
+        None
     }
 
     fn pop(&self) -> Option<DecodeJob> {
         let mut q = self.jobs.lock().expect("decode queue lock");
         loop {
             if let Some(job) = q.pop_front() {
+                let mut bytes = self.queued_bytes.lock().expect("decode bytes lock");
+                *bytes = bytes.saturating_sub(job.bytes.len());
                 return Some(job);
             }
             if *self.closed.lock().expect("decode closed lock") {
@@ -168,12 +204,15 @@ struct DecodeJobTx {
 }
 
 impl DecodeJobTx {
-    fn send(&self, job: DecodeJob) -> Result<(), ()> {
+    /// Returns `Err(job)` if the queue is closed or the job could not be accepted.
+    fn send(&self, job: DecodeJob) -> Result<(), DecodeJob> {
         if *self.queue.closed.lock().expect("decode closed lock") {
-            return Err(());
+            return Err(job);
         }
-        self.queue.push(job);
-        Ok(())
+        match self.queue.push(job) {
+            None => Ok(()),
+            Some(rejected) => Err(rejected),
+        }
     }
 }
 
@@ -222,6 +261,8 @@ impl ImageCache {
             avatar_placeholder,
             entries: HashMap::new(),
             order: VecDeque::new(),
+            memory_bytes: 0,
+            pinned_urls: HashSet::new(),
             job_tx,
             result_rx,
         }
@@ -254,6 +295,30 @@ impl ImageCache {
             Some(ImageState::Ready { width, height, .. }) => Some(Size::new(*width, *height)),
             _ => None,
         }
+    }
+
+    /// Replace the pinned (viewport) URL set. Soft-budget eviction re-runs after unpin.
+    pub fn set_pinned_urls(&mut self, urls: impl IntoIterator<Item = String>) {
+        self.pinned_urls.clear();
+        self.pinned_urls.extend(urls);
+        self.evict_overflow(None);
+    }
+
+    pub fn clear_pinned(&mut self) {
+        if self.pinned_urls.is_empty() {
+            return;
+        }
+        self.pinned_urls.clear();
+        self.evict_overflow(None);
+    }
+
+    pub fn is_pinned(&self, url: &str) -> bool {
+        self.pinned_urls.contains(url)
+    }
+
+    #[cfg(test)]
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes
     }
 
     /// Returns `true` if a network fetch should be started for this URL.
@@ -348,12 +413,22 @@ impl ImageCache {
                 kind,
             },
         );
-        let _ = self.job_tx.send(DecodeJob { url, kind, bytes });
+        if let Err(rejected) = self.job_tx.send(DecodeJob {
+            url: url.clone(),
+            kind,
+            bytes,
+        }) {
+            // Queue full / closed: free compressed bytes and mark failed so the slot can retry later.
+            let _ = rejected;
+            self.mark_failed(&url);
+        }
     }
 
     pub fn mark_failed(&mut self, url: &str) {
         if let Some(entry) = self.entries.get_mut(url) {
+            let old = entry_bytes(&entry.state);
             entry.state = ImageState::Failed;
+            self.memory_bytes = self.memory_bytes.saturating_sub(old);
             self.touch(url);
         }
     }
@@ -387,36 +462,98 @@ impl ImageCache {
     }
 
     fn insert_entry(&mut self, url: String, entry: ImageEntry) {
-        if self.entries.insert(url.clone(), entry).is_none() {
-            self.order.push_back(url);
-        } else {
+        let new_cost = entry_bytes(&entry.state);
+        if let Some(old) = self.entries.insert(url.clone(), entry) {
+            self.memory_bytes = self
+                .memory_bytes
+                .saturating_sub(entry_bytes(&old.state))
+                .saturating_add(new_cost);
             self.touch(&url);
+        } else {
+            self.memory_bytes = self.memory_bytes.saturating_add(new_cost);
+            self.order.push_back(url.clone());
         }
-        self.evict_overflow();
+        // Protect the URL just inserted so a single tall Ready cannot evict itself,
+        // and two viewport images cannot thrash each other mid-insert.
+        self.evict_overflow(Some(url.as_str()));
     }
 
     fn remove_entry(&mut self, url: &str) {
-        self.entries.remove(url);
+        if let Some(old) = self.entries.remove(url) {
+            self.memory_bytes = self.memory_bytes.saturating_sub(entry_bytes(&old.state));
+        }
         self.order.retain(|u| u != url);
     }
 
-    fn evict_overflow(&mut self) {
+    /// Evict overflow.
+    ///
+    /// - **Hard** entry cap (`MAX_MEMORY_ENTRIES`): prefer unpinned non-Loading; may drop
+    ///   pinned only if needed to stay under the cap. Never drops `protect`.
+    /// - **Soft** Ready byte budget (`MAX_MEMORY_BYTES`): only unpinned non-Loading non-protect.
+    ///   Pinned / protected Ready may leave the cache temporarily over budget.
+    fn evict_overflow(&mut self, protect: Option<&str>) {
+        // --- Hard entry count ---
         while self.entries.len() > MAX_MEMORY_ENTRIES {
-            let Some(victim) = self
-                .order
-                .iter()
-                .find(|u| {
-                    self.entries
-                        .get(*u)
-                        .is_some_and(|e| !matches!(e.state, ImageState::Loading))
-                })
-                .cloned()
-            else {
-                // All remaining entries are Loading — wait for decode/fail.
+            let Some(victim) = self.pick_hard_eviction_victim(protect) else {
                 break;
             };
             self.remove_entry(&victim);
         }
+
+        // --- Soft Ready byte budget ---
+        while self.memory_bytes > MAX_MEMORY_BYTES {
+            let Some(victim) = self
+                .order
+                .iter()
+                .find(|u| {
+                    let Some(url) = protect else {
+                        return self.is_soft_evictable(u);
+                    };
+                    u.as_str() != url && self.is_soft_evictable(u)
+                })
+                .cloned()
+            else {
+                // Only pinned/protected Ready left — allow soft overshoot.
+                break;
+            };
+            self.remove_entry(&victim);
+        }
+    }
+
+    fn is_soft_evictable(&self, url: &str) -> bool {
+        if self.pinned_urls.contains(url) {
+            return false;
+        }
+        self.entries
+            .get(url)
+            .is_some_and(|e| matches!(e.state, ImageState::Ready { .. } | ImageState::Failed))
+    }
+
+    fn pick_hard_eviction_victim(&self, protect: Option<&str>) -> Option<String> {
+        let is_protect = |u: &str| protect == Some(u);
+        // 1) Oldest non-Loading, unpinned, unprotected
+        if let Some(v) = self.order.iter().find(|u| {
+            !is_protect(u)
+                && !self.pinned_urls.contains(u.as_str())
+                && self
+                    .entries
+                    .get(*u)
+                    .is_some_and(|e| !matches!(e.state, ImageState::Loading))
+        }) {
+            return Some(v.clone());
+        }
+        // 2) Oldest non-Loading unprotected (may be pinned — hard cap wins)
+        if let Some(v) = self.order.iter().find(|u| {
+            !is_protect(u)
+                && self
+                    .entries
+                    .get(*u)
+                    .is_some_and(|e| !matches!(e.state, ImageState::Loading))
+        }) {
+            return Some(v.clone());
+        }
+        // 3) Oldest Loading unprotected
+        self.order.iter().find(|u| !is_protect(u)).cloned()
     }
 
     fn refresh_stale_avatars(&mut self) -> bool {
@@ -456,22 +593,49 @@ fn avatar_dimensions_match(width: u16, height: u16) -> bool {
     width == expected.width && height == expected.height
 }
 
-fn decode_dynamic_image(bytes: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
-    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+fn entry_bytes(state: &ImageState) -> u64 {
+    match state {
+        ImageState::Loading | ImageState::Failed => 0,
+        ImageState::Ready {
+            estimated_bytes, ..
+        } => *estimated_bytes,
+    }
+}
+
+/// Cost of a Ready entry from terminal cell size × font pixels (RGBA × 2 for protocol overhead).
+pub fn estimate_ready_bytes(font_w: u16, font_h: u16, cell_w: u16, cell_h: u16) -> u64 {
+    let pixel_w = u64::from(cell_w).saturating_mul(u64::from(font_w));
+    let pixel_h = u64::from(cell_h).saturating_mul(u64::from(font_h));
+    let rgba_bytes = pixel_w.saturating_mul(pixel_h).saturating_mul(4);
+    rgba_bytes.saturating_mul(2).max(64 * 1024)
+}
+
+fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DECODE_SIDE);
     limits.max_image_height = Some(MAX_DECODE_SIDE);
     // ~64 MiB decoded RGBA budget (plus image crate overhead).
     limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
+    limits
+}
+
+fn decode_dynamic_image(bytes: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(decode_limits());
     match reader.decode() {
         Ok(img) => {
             check_decoded_bounds(&img)?;
             Ok(img)
         }
-        Err(_) if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => {
-            // Fallback path for odd JPEG headers; still enforce pixel budget.
-            let img = image::load_from_memory(bytes)?;
+        // Odd JPEG SOI/headers: force Jpeg format, but never drop Limits (decompression-bomb path).
+        Err(err) if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => {
+            if matches!(err, image::ImageError::Limits(_)) {
+                return Err(err);
+            }
+            let mut reader = image::ImageReader::new(Cursor::new(bytes));
+            reader.set_format(image::ImageFormat::Jpeg);
+            reader.limits(decode_limits());
+            let img = reader.decode()?;
             check_decoded_bounds(&img)?;
             Ok(img)
         }
@@ -501,6 +665,7 @@ fn ready_state(out: DecodeOutput) -> ImageState {
         draw: out.draw,
         width: out.size.width,
         height: out.size.height,
+        estimated_bytes: out.estimated_bytes,
     }
 }
 
@@ -563,7 +728,13 @@ fn decode_image(
     };
     let pixels = Arc::new(dyn_img);
     let draw = build_draw(picker, pixels, size, kind)?;
-    Ok(DecodeOutput { draw, size })
+    let font = decode_picker.font_size();
+    let estimated_bytes = estimate_ready_bytes(font.width, font.height, size.width, size.height);
+    Ok(DecodeOutput {
+        draw,
+        size,
+        estimated_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -658,6 +829,148 @@ mod tests {
         }
         assert!(cache.entries.len() <= MAX_MEMORY_ENTRIES);
         assert_eq!(cache.entries.len(), cache.order.len());
+    }
+
+    /// Synthetic Ready; `estimated_bytes` is the soft-budget charge (protocol is a tiny stub).
+    fn fake_ready(cell_w: u16, cell_h: u16, estimated_bytes: u64) -> ImageState {
+        ImageState::Ready {
+            draw: ReadyDraw::Full({
+                let picker = Picker::halfblocks();
+                let img: image::DynamicImage =
+                    image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
+                        8,
+                        8,
+                        image::Rgba([1, 2, 3, 255]),
+                    )
+                    .into();
+                picker
+                    .new_protocol(img, Size::new(1, 1), Resize::Fit(None))
+                    .expect("tiny protocol")
+            }),
+            width: cell_w,
+            height: cell_h,
+            estimated_bytes,
+        }
+    }
+
+    #[test]
+    fn tall_ready_does_not_self_evict() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        // Charge more than the soft budget alone — insert protect must keep it.
+        let url = "http://example.com/tall.jpg".to_string();
+        let fat = MAX_MEMORY_BYTES + 10 * 1024 * 1024;
+        cache.insert_entry(
+            url.clone(),
+            ImageEntry {
+                state: fake_ready(78, 200, fat),
+                kind: ImageKind::Content { max_cols: 78 },
+            },
+        );
+        assert!(
+            cache.get(&url).is_some(),
+            "just-inserted tall Ready must survive soft budget"
+        );
+        assert!(
+            !cache.request(url.clone(), ImageKind::Content { max_cols: 78 }),
+            "Ready must not re-enter Loading"
+        );
+    }
+
+    #[test]
+    fn two_pinned_large_images_do_not_evict_each_other() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let a = "http://example.com/a.jpg".to_string();
+        let b = "http://example.com/b.jpg".to_string();
+        // Each ~80 MiB so together exceed 128 MiB soft budget.
+        let each = 80 * 1024 * 1024u64;
+        assert!(each.saturating_mul(2) > MAX_MEMORY_BYTES);
+        cache.set_pinned_urls([a.clone(), b.clone()]);
+        cache.insert_entry(
+            a.clone(),
+            ImageEntry {
+                state: fake_ready(80, 120, each),
+                kind: ImageKind::Content { max_cols: 80 },
+            },
+        );
+        cache.insert_entry(
+            b.clone(),
+            ImageEntry {
+                state: fake_ready(80, 120, each),
+                kind: ImageKind::Content { max_cols: 80 },
+            },
+        );
+        assert!(cache.get(&a).is_some(), "pinned a kept");
+        assert!(cache.get(&b).is_some(), "pinned b kept");
+        assert!(
+            cache.memory_bytes() > MAX_MEMORY_BYTES,
+            "soft overshoot allowed while pinned"
+        );
+    }
+
+    #[test]
+    fn unpin_allows_soft_budget_eviction() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let a = "http://example.com/old.jpg".to_string();
+        let b = "http://example.com/new.jpg".to_string();
+        let each = 80 * 1024 * 1024u64;
+        cache.set_pinned_urls([a.clone(), b.clone()]);
+        cache.insert_entry(
+            a.clone(),
+            ImageEntry {
+                state: fake_ready(80, 120, each),
+                kind: ImageKind::Content { max_cols: 80 },
+            },
+        );
+        cache.insert_entry(
+            b.clone(),
+            ImageEntry {
+                state: fake_ready(80, 120, each),
+                kind: ImageKind::Content { max_cols: 80 },
+            },
+        );
+        // Unpin both; soft eviction should reclaim until under budget (LRU drops oldest).
+        cache.clear_pinned();
+        assert!(
+            cache.memory_bytes() <= MAX_MEMORY_BYTES,
+            "after unpin, soft budget enforced, got {}",
+            cache.memory_bytes()
+        );
+        // At least one of the oversized pair must be gone.
+        let kept = cache.get(&a).is_some() as u8 + cache.get(&b).is_some() as u8;
+        assert!(
+            kept <= 1,
+            "LRU should drop at least the older of two fat images"
+        );
+    }
+
+    #[test]
+    fn ready_not_re_requested_on_prefetch() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/stable.jpg".to_string();
+        cache.insert_entry(
+            url.clone(),
+            ImageEntry {
+                state: fake_ready(40, 20, 64 * 1024),
+                kind: ImageKind::Content { max_cols: 40 },
+            },
+        );
+        for _ in 0..20 {
+            assert!(!cache.request(url.clone(), ImageKind::Content { max_cols: 40 }));
+        }
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Ready { .. })
+        ));
+    }
+
+    #[test]
+    fn estimate_ready_bytes_is_pixel_based_not_16kib_per_cell() {
+        // Old formula: 78*200*16KiB = 249.6 MiB. New: ~ font 10x20 → 780*4000*4*2 ≈ 25 MiB.
+        let est = estimate_ready_bytes(10, 20, 78, 200);
+        assert!(est < 64 * 1024 * 1024, "got {est}");
+        assert!(est >= 64 * 1024);
+        let old_style = 78u64 * 200 * 16 * 1024;
+        assert!(est < old_style / 4);
     }
 
     #[test]

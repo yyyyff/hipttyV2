@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use hiptty_image::thread_avatar_job;
 
-use crate::app::{App, DetailFetchMode, DetailState, Overlay, Page};
+use crate::app::{App, DetailLoadIntent, DetailState, Overlay, Page};
 use crate::composer::{
     delete_label, delete_post_action, edit_body, edit_header, edit_post_action, new_thread_action,
     quote_header, quote_post_action, reply_thread_action, ComposerKind, ComposerState,
@@ -18,6 +18,13 @@ use crate::handlers::{
 use crate::worker::{StoredCreds, WorkerRequest, WorkerResponse};
 
 pub fn handle_key(app: &mut App, key: KeyEvent, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    // Raw mode: Ctrl+C is a key event, not SIGINT — handle before CONTROL is filtered out.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
+        app.quit = true;
+        return;
+    }
     if app.toast.is_some()
         && matches!(key.code, KeyCode::Esc | KeyCode::Enter)
         && app.overlay == Overlay::None
@@ -271,11 +278,17 @@ fn handle_detail_key(
 ) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('b') => {
+            // Note: global Esc/b usually intercepts via navigate_back() before this arm.
+            // Pin cleanup is guaranteed by draw() when page != ThreadDetail.
             app.page = Page::ThreadFeed;
             app.detail.loading = false;
             app.detail.loading_more = false;
-            app.detail.pending_fetch = None;
+            app.detail.pending_intent = None;
+            app.detail.pending_request_id = 0;
             app.detail.error = None;
+            if let Some(cache) = app.images_mut() {
+                cache.clear_pinned();
+            }
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.detail.detail.is_some() {
@@ -305,6 +318,7 @@ fn handle_detail_key(
                     app.detail.selected = sel;
                     app.detail.scroll_top = scroll;
                 }
+                maybe_load_more_detail(app, worker_tx);
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
@@ -334,16 +348,22 @@ fn handle_detail_key(
                     app.detail.scroll_top = scroll;
                     app.detail.selected = sel;
                 }
+                maybe_load_more_detail(app, worker_tx);
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::Char('g') => {
-            request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+            request_thread_detail(app, worker_tx, 1, DetailLoadIntent::ReplaceTop);
         }
         KeyCode::Char('G') => {
-            if let Some(last) = app.detail.detail.as_ref().map(|d| d.last_page) {
-                if last > 0 {
-                    request_thread_detail(app, worker_tx, last, DetailFetchMode::Replace);
+            if let Some(d) = app.detail.detail.as_ref() {
+                let last = d.last_page.max(1);
+                // Buffer already ends at the last page → scroll only (no replace/flicker).
+                // If we only hold the last page (after a prior G), upward scroll will prepend.
+                if d.page >= last {
+                    app.scroll_detail_to_bottom();
+                } else if last > 0 {
+                    request_thread_detail(app, worker_tx, last, DetailLoadIntent::ReplaceBottom);
                 }
             }
         }
@@ -360,33 +380,34 @@ pub fn open_thread_detail(
 ) {
     app.detail = DetailState::from_summary(thread, app.feed.fid);
     app.page = Page::ThreadDetail;
-    request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+    request_thread_detail(app, worker_tx, 1, DetailLoadIntent::ReplaceTop);
 }
 
 pub fn request_thread_detail(
     app: &mut App,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
     page: u32,
-    mode: DetailFetchMode,
+    intent: DetailLoadIntent,
 ) {
     if app.detail.tid.is_empty() {
         return;
     }
-    if mode == DetailFetchMode::Replace {
-        if page == 1 {
-            app.detail.selected = 0;
-            app.detail.scroll_top = 0;
+    match intent {
+        DetailLoadIntent::ReplaceTop | DetailLoadIntent::ReplaceBottom => {
+            app.detail.loading = true;
+            app.detail.loading_more = false;
         }
-        app.detail.loading = true;
-        app.detail.loading_more = false;
-    } else {
-        app.detail.loading_more = true;
+        DetailLoadIntent::AppendPreserve | DetailLoadIntent::PrependPreserve => {
+            app.detail.loading_more = true;
+        }
     }
-    app.detail.pending_fetch = Some(mode);
+    let request_id = app.detail.allocate_request_id();
+    app.detail.pending_intent = Some(intent);
     app.detail.error = None;
     let _ = worker_tx.send(WorkerRequest::LoadThreadDetail {
         tid: app.detail.tid.clone(),
         page,
+        request_id,
     });
 }
 
@@ -394,7 +415,7 @@ pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<W
     if app.detail.loading || app.detail.loading_more {
         return;
     }
-    let page = app.detail.detail.as_ref().map(|d| d.page);
+    let page_hi = app.detail.detail.as_ref().map(|d| d.page);
     let last_page = app.detail.detail.as_ref().map(|d| d.last_page);
     let post_count = app
         .detail
@@ -402,10 +423,10 @@ pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<W
         .as_ref()
         .map(|d| d.posts.len())
         .unwrap_or(0);
-    let (Some(page), Some(last_page)) = (page, last_page) else {
+    let (Some(page_hi), Some(last_page)) = (page_hi, last_page) else {
         return;
     };
-    if page >= last_page || post_count == 0 {
+    if post_count == 0 {
         return;
     }
     let viewport = app.scroll_viewport_height();
@@ -413,12 +434,33 @@ pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<W
     let Some(layout) = app.detail_layout() else {
         return;
     };
+    let first_visible = layout.first_visible(scroll_top);
     let last_visible = layout.last_visible(scroll_top, viewport);
-    let remaining_floors = post_count.saturating_sub(last_visible + 1);
-    if remaining_floors > 2 {
+
+    // Near top and missing earlier pages (typical after `G` only loaded the last page).
+    let page_lo = app.detail.loaded_page_lo.max(1);
+    if page_lo > 1 && (scroll_top == 0 || first_visible <= 2) {
+        request_thread_detail(
+            app,
+            worker_tx,
+            page_lo - 1,
+            DetailLoadIntent::PrependPreserve,
+        );
         return;
     }
-    request_thread_detail(app, worker_tx, page + 1, DetailFetchMode::Append);
+
+    // Near bottom and missing later pages.
+    if page_hi < last_page {
+        let remaining_floors = post_count.saturating_sub(last_visible + 1);
+        if remaining_floors <= 2 {
+            request_thread_detail(
+                app,
+                worker_tx,
+                page_hi + 1,
+                DetailLoadIntent::AppendPreserve,
+            );
+        }
+    }
 }
 
 pub fn maybe_load_more(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -524,16 +566,21 @@ pub fn handle_worker_response(
         WorkerResponse::ThreadDetailLoaded {
             tid,
             page: _,
+            request_id,
             result,
         } => {
             if app.detail.tid != tid {
                 return;
             }
-            let mode = app.detail.pending_fetch.take().unwrap_or({
+            // Drop stale responses from earlier g/G / append requests.
+            if request_id != app.detail.pending_request_id {
+                return;
+            }
+            let intent = app.detail.pending_intent.take().unwrap_or({
                 if app.detail.loading_more {
-                    DetailFetchMode::Append
+                    DetailLoadIntent::AppendPreserve
                 } else {
-                    DetailFetchMode::Replace
+                    DetailLoadIntent::ReplaceTop
                 }
             });
             app.detail.loading = false;
@@ -544,34 +591,92 @@ pub fn handle_worker_response(
                     if let Some(fid) = incoming.fid {
                         app.detail.fid = Some(fid);
                     }
-                    let appended_posts = match mode {
-                        DetailFetchMode::Append => {
+                    let page = incoming.page.max(1);
+                    let mut prepended_count = 0usize;
+                    let edge_posts = match intent {
+                        DetailLoadIntent::AppendPreserve => {
                             if let Some(existing) = app.detail.detail.as_mut() {
                                 let new_posts = incoming.posts.clone();
                                 existing.posts.extend(new_posts.clone());
                                 existing.page = incoming.page;
                                 existing.last_page = incoming.last_page;
+                                // loaded_page_lo unchanged
                                 new_posts
                             } else {
+                                app.detail.loaded_page_lo = page;
                                 app.detail.detail = Some(incoming);
                                 Vec::new()
                             }
                         }
-                        DetailFetchMode::Replace => {
+                        DetailLoadIntent::PrependPreserve => {
+                            if let Some(existing) = app.detail.detail.as_mut() {
+                                let new_posts = incoming.posts.clone();
+                                prepended_count = new_posts.len();
+                                let mut merged = new_posts.clone();
+                                merged.append(&mut existing.posts);
+                                existing.posts = merged;
+                                // Keep highest loaded page (`existing.page`); advance lo.
+                                existing.last_page = incoming.last_page;
+                                app.detail.loaded_page_lo = page;
+                                new_posts
+                            } else {
+                                app.detail.loaded_page_lo = page;
+                                app.detail.detail = Some(incoming);
+                                Vec::new()
+                            }
+                        }
+                        DetailLoadIntent::ReplaceTop | DetailLoadIntent::ReplaceBottom => {
+                            app.detail.loaded_page_lo = page;
                             let all_posts = incoming.posts.clone();
                             app.detail.detail = Some(incoming);
                             all_posts
                         }
                     };
                     app.detail.error = None;
-                    if mode == DetailFetchMode::Append && !appended_posts.is_empty() {
-                        prefetch_detail_posts(app, &appended_posts, worker_tx);
-                    } else {
-                        prefetch_detail_images(app, worker_tx);
-                    }
-                    match mode {
-                        DetailFetchMode::Append => app.preserve_detail_scroll(),
-                        DetailFetchMode::Replace => app.sync_detail_scroll(),
+                    match intent {
+                        DetailLoadIntent::AppendPreserve => {
+                            if !edge_posts.is_empty() {
+                                prefetch_detail_posts(app, &edge_posts, worker_tx);
+                            }
+                            // preserve_detail_scroll invalidates layout (revision++) and rebuilds.
+                            app.preserve_detail_scroll();
+                        }
+                        DetailLoadIntent::PrependPreserve => {
+                            // Shift scroll/selection by the height/count of prepended floors so the
+                            // viewport stays on the same content the user was reading.
+                            let old_scroll = app.detail.scroll_top;
+                            let old_selected = app.detail.selected;
+                            app.detail.invalidate_layout();
+                            let shift = app
+                                .detail_layout()
+                                .map(|l| l.offset(prepended_count))
+                                .unwrap_or(0);
+                            app.detail.scroll_top = old_scroll.saturating_add(shift);
+                            app.detail.selected = old_selected.saturating_add(prepended_count);
+                            app.clamp_detail_selected();
+                            if !edge_posts.is_empty() {
+                                prefetch_detail_posts(app, &edge_posts, worker_tx);
+                            }
+                            // Further earlier pages load on the next upward scroll (avoid cascade).
+                        }
+                        DetailLoadIntent::ReplaceTop => {
+                            // Posts replaced — revision must change even when post count matches.
+                            app.detail.invalidate_layout();
+                            // g / open / refresh page 1 jump to top; mid-page refresh keeps selection.
+                            let page = app.detail.detail.as_ref().map(|d| d.page).unwrap_or(1);
+                            if page <= 1 {
+                                app.detail.selected = 0;
+                                app.detail.scroll_top = 0;
+                            }
+                            app.clamp_detail_selected();
+                            prefetch_detail_images(app, worker_tx);
+                            app.sync_detail_scroll();
+                        }
+                        DetailLoadIntent::ReplaceBottom => {
+                            app.detail.invalidate_layout();
+                            prefetch_detail_images(app, worker_tx);
+                            app.scroll_detail_to_bottom();
+                        }
                     }
                 }
                 Err(err) => {
@@ -708,15 +813,45 @@ pub fn handle_worker_response(
             }
         }
         WorkerResponse::LoggedOut { result } => {
-            // UI already switched to Login; surface adapter errors if cookie clear failed.
-            if let Err(err) = result {
-                app.set_toast(format!("登出清理失败: {err}"), true);
+            // UI already on Login; only toast "已登出" when local + worker cleanup both OK.
+            let pending = app.logout_pending;
+            app.logout_pending = false;
+            let local_err = app.logout_local_error.take();
+            if !pending {
+                // Spurious / late response — only surface hard worker failures.
+                if let Err(err) = result {
+                    app.set_toast(format!("登出清理失败: {err}"), true);
+                }
+                return;
+            }
+            match (result, local_err) {
+                (Ok(()), None) => app.set_toast("已登出", false),
+                (Ok(()), Some(local)) => {
+                    // Worker OK but credentials may remain — keep the error, no success cover.
+                    app.set_toast(local, true);
+                }
+                (Err(err), None) => {
+                    app.set_toast(format!("登出清理失败: {err}"), true);
+                }
+                (Err(err), Some(local)) => {
+                    app.set_toast(format!("{local}；会话清理也失败: {err}"), true);
+                }
             }
         }
         WorkerResponse::ComposerImageUploaded { .. } => {
             // Image insert path removed from TUI; ignore late upload responses.
         }
-        WorkerResponse::ImageFetched { url, kind, result } => {
+        WorkerResponse::ImageFetched {
+            url,
+            kind,
+            session_epoch,
+            result,
+        } => {
+            // Always free a concurrency slot; drop payload if the session turned over.
+            if session_epoch != app.session_epoch {
+                app.on_image_fetch_finished(worker_tx);
+                return;
+            }
             let outcome = match result {
                 Ok(bytes) => hiptty_image::FetchOutcome::Ok(bytes),
                 Err(err) if err.code() == hiptty_core::ErrorCode::NotFound => {
@@ -754,13 +889,17 @@ pub fn prefetch_detail_viewport_images(
     app: &mut App,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
-    let posts = app
+    let post_count = app
         .detail
         .detail
         .as_ref()
-        .map(|d| d.posts.clone())
-        .unwrap_or_default();
-    if posts.is_empty() {
+        .map(|d| d.posts.len())
+        .unwrap_or(0);
+    if post_count == 0 {
+        // Empty detail must not keep a previous thread's pin set.
+        if let Some(cache) = app.images_mut() {
+            cache.clear_pinned();
+        }
         return;
     }
     let width = app.content_width();
@@ -778,11 +917,22 @@ pub fn prefetch_detail_viewport_images(
     let start = first.saturating_sub(DETAIL_IMAGE_PREFETCH_PAD);
     let end = last
         .saturating_add(DETAIL_IMAGE_PREFETCH_PAD)
-        .min(posts.len().saturating_sub(1));
+        .min(post_count.saturating_sub(1));
+    // Only clone the visible pad range — full-list clone was O(n) string copy on every scroll.
+    let slice: Vec<_> = app
+        .detail
+        .detail
+        .as_ref()
+        .map(|d| d.posts[start..=end].to_vec())
+        .unwrap_or_default();
     let mut jobs = Vec::new();
     if let Some(cache) = app.images_mut() {
         jobs.extend(hiptty_image::prefetch_posts_range(
-            cache, &posts, start, end, width,
+            cache,
+            &slice,
+            0,
+            slice.len().saturating_sub(1),
+            width,
         ));
     }
     app.dispatch_image_fetches(jobs, worker_tx);
@@ -1139,6 +1289,7 @@ fn apply_post_success(
         PostAction::NewThread { .. } => {
             if let Some(tid) = result.tid {
                 app.page = Page::ThreadDetail;
+                let loaded_page = result.detail.as_ref().map(|d| d.page.max(1)).unwrap_or(1);
                 app.detail = DetailState {
                     tid: tid.clone(),
                     fid: Some(app.feed.fid),
@@ -1150,13 +1301,18 @@ fn apply_post_success(
                     scroll_top: 0,
                     loading: false,
                     loading_more: false,
-                    pending_fetch: None,
+                    pending_intent: None,
+                    pending_request_id: 0,
+                    next_request_id: 1,
+                    loaded_page_lo: loaded_page,
                     error: None,
+                    layout_revision: 0,
                     layout: None,
                 };
                 if app.detail.detail.is_none() {
-                    request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+                    request_thread_detail(app, worker_tx, 1, DetailLoadIntent::ReplaceTop);
                 } else {
+                    app.detail.invalidate_layout();
                     prefetch_detail_images(app, worker_tx);
                     app.sync_detail_scroll();
                 }
@@ -1167,16 +1323,19 @@ fn apply_post_success(
         | PostAction::QuotePost { .. }
         | PostAction::EditPost { .. } => {
             if let Some(detail) = result.detail {
+                let page = detail.page.max(1);
                 app.detail.detail = Some(detail);
+                app.detail.loaded_page_lo = page;
                 app.detail.loading = false;
                 app.detail.loading_more = false;
-                app.detail.pending_fetch = None;
+                app.detail.pending_intent = None;
+                app.detail.pending_request_id = 0;
                 app.detail.error = None;
                 app.invalidate_detail_layout();
                 prefetch_detail_images(app, worker_tx);
                 app.sync_detail_scroll();
             } else if app.page == Page::ThreadDetail {
-                request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+                request_thread_detail(app, worker_tx, 1, DetailLoadIntent::ReplaceTop);
             }
         }
         _ => {}

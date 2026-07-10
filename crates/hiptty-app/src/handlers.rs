@@ -3,7 +3,7 @@ use hiptty_core::{list_item_to_thread_summary, AdapterError, ErrorCode, ListItem
 use hiptty_widgets::MAIN_MENU_ITEMS;
 use tokio::sync::mpsc;
 
-use crate::app::{App, DetailFetchMode, DetailState, FeedState, Overlay, Page};
+use crate::app::{App, DetailLoadIntent, DetailState, FeedState, Overlay, Page};
 use crate::commands::{execute_command, tab_complete_command};
 use crate::composer::{ComposerKind, ComposerState};
 use crate::list_page::ListPageKind;
@@ -479,8 +479,12 @@ fn open_notification_target(
                 scroll_top: 0,
                 loading: true,
                 loading_more: false,
-                pending_fetch: None,
+                pending_intent: None,
+                pending_request_id: 0,
+                next_request_id: 1,
+                loaded_page_lo: 1,
                 error: None,
+                layout_revision: 0,
                 layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
@@ -517,8 +521,12 @@ fn open_thread_from_item(
                 scroll_top: 0,
                 loading: true,
                 loading_more: false,
-                pending_fetch: None,
+                pending_intent: None,
+                pending_request_id: 0,
+                next_request_id: 1,
+                loaded_page_lo: 1,
                 error: None,
+                layout_revision: 0,
                 layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
@@ -554,7 +562,7 @@ fn open_thread_summary(
     let fid = fid.unwrap_or(app.feed.fid);
     app.detail = DetailState::from_summary(&thread, fid);
     navigate_to(app, Page::ThreadDetail);
-    crate::event::request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
+    crate::event::request_thread_detail(app, worker_tx, 1, DetailLoadIntent::ReplaceTop);
 }
 
 pub fn handle_list_response(
@@ -682,8 +690,13 @@ pub fn handle_worker_extensions(
             has_notifications,
         } => {
             app.unread.check_in_flight = false;
-            app.unread.has_pm = *has_pm;
-            app.unread.has_notifications = *has_notifications;
+            // Network errors yield None — keep previous unread flags.
+            if let Some(v) = has_pm {
+                app.unread.has_pm = *v;
+            }
+            if let Some(v) = has_notifications {
+                app.unread.has_notifications = *v;
+            }
             true
         }
         WorkerResponse::ThreadAtPostLoaded { tid, result } => {
@@ -697,9 +710,12 @@ pub fn handle_worker_extensions(
                     if let Some(fid) = detail.fid {
                         app.detail.fid = Some(fid);
                     }
+                    let page = detail.page.max(1);
                     app.detail.detail = Some(detail.clone());
+                    app.detail.loaded_page_lo = page;
                     app.detail.error = None;
                     app.invalidate_detail_layout();
+                    app.clamp_detail_selected();
                     crate::event::prefetch_detail_images(app, worker_tx);
                     app.sync_detail_scroll();
                 }

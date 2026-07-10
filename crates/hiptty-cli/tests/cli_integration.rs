@@ -10,6 +10,7 @@ fn parse_json(stdout: &[u8]) -> Value {
     serde_json::from_slice(stdout).expect("stdout should be valid JSON")
 }
 
+/// Forums list is built from the static `FORUMS` table (no network).
 #[test]
 fn forums_list_json_envelope() {
     let assert = hiptty().args(["forums", "list"]).assert().success();
@@ -26,6 +27,7 @@ fn forums_list_json_envelope() {
 }
 
 #[test]
+#[ignore = "requires network; run with: cargo test -p hiptty-cli -- --ignored"]
 fn auth_status_json_envelope() {
     let assert = hiptty().args(["auth", "status"]).assert().success();
     let json = parse_json(&assert.get_output().stdout);
@@ -36,6 +38,7 @@ fn auth_status_json_envelope() {
 }
 
 #[test]
+#[ignore = "requires network; run with: cargo test -p hiptty-cli -- --ignored"]
 fn thread_show_json_envelope() {
     let assert = hiptty()
         .args(["thread", "show", "448060", "--page", "1"])
@@ -59,6 +62,7 @@ fn human_forums_list_prints_names() {
 }
 
 #[test]
+#[ignore = "requires network; run with: cargo test -p hiptty-cli -- --ignored"]
 fn search_without_login_returns_auth_or_business_error() {
     let assert = hiptty()
         .args(["search", "rust", "--fid", "7"])

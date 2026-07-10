@@ -44,9 +44,14 @@ pub struct FloorListProps<'a> {
 ///
 /// Built in a **single** pass over posts. Scroll / hit-test helpers should reuse this
 /// rather than calling [`measure_floor`] repeatedly (which re-wraps content each time).
+///
+/// [`Self::first_visible`] / [`Self::floor_index_at_line`] are O(log n) via
+/// [`slice::partition_point`] on the monotonic `offsets` (and bottoms).
 #[derive(Debug, Clone)]
 pub struct FloorLayout {
     pub width: u16,
+    /// Bumped when posts / image heights change so caches cannot reuse a same-width, same-count layout.
+    pub revision: u64,
     pub heights: Vec<DocY>,
     pub offsets: Vec<DocY>,
     pub total: DocY,
@@ -58,6 +63,7 @@ impl FloorLayout {
         width: u16,
         palette: Palette,
         images: Option<&ImageCache>,
+        revision: u64,
     ) -> Self {
         let mut heights = Vec::with_capacity(posts.len());
         let mut offsets = Vec::with_capacity(posts.len());
@@ -70,6 +76,7 @@ impl FloorLayout {
         }
         Self {
             width,
+            revision,
             heights,
             offsets,
             total: top,
@@ -80,8 +87,8 @@ impl FloorLayout {
         self.heights.len()
     }
 
-    pub fn matches(&self, width: u16, post_count: usize) -> bool {
-        self.width == width && self.heights.len() == post_count
+    pub fn matches(&self, width: u16, revision: u64) -> bool {
+        self.width == width && self.revision == revision
     }
 
     pub fn height(&self, idx: usize) -> DocY {
@@ -92,17 +99,32 @@ impl FloorLayout {
         self.offsets.get(idx).copied().unwrap_or(0)
     }
 
+    /// Max document scroll so the last line can sit at the bottom of the viewport.
+    pub fn max_scroll(&self, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        self.total.saturating_sub(u32::from(viewport_h))
+    }
+
+    /// First floor whose content bottom is past `scroll_top` (O(log n)).
     pub fn first_visible(&self, scroll_top: DocY) -> usize {
         if self.heights.is_empty() {
             return 0;
         }
-        for (idx, &top) in self.offsets.iter().enumerate() {
-            let bottom = top.saturating_add(self.heights[idx]);
-            if bottom > scroll_top {
-                return idx;
+        // Binary search: first index where offset[i] + height[i] > scroll_top.
+        let mut lo = 0usize;
+        let mut hi = self.heights.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let bottom = self.offsets[mid].saturating_add(self.heights[mid]);
+            if bottom <= scroll_top {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        self.heights.len().saturating_sub(1)
+        lo.min(self.heights.len().saturating_sub(1))
     }
 
     pub fn last_visible(&self, scroll_top: DocY, viewport_h: u16) -> usize {
@@ -110,8 +132,10 @@ impl FloorLayout {
             return 0;
         }
         let viewport_bottom = scroll_top.saturating_add(u32::from(viewport_h));
-        let mut last = self.first_visible(scroll_top);
-        for (idx, &top) in self.offsets.iter().enumerate() {
+        let first = self.first_visible(scroll_top);
+        let mut last = first;
+        for idx in first..self.heights.len() {
+            let top = self.offsets[idx];
             if top >= viewport_bottom {
                 break;
             }
@@ -123,16 +147,14 @@ impl FloorLayout {
         last
     }
 
+    /// Floor containing document line `line` (O(log n)).
     pub fn floor_index_at_line(&self, line: DocY) -> usize {
         if self.offsets.is_empty() {
             return 0;
         }
-        for (idx, &top) in self.offsets.iter().enumerate().rev() {
-            if line >= top {
-                return idx;
-            }
-        }
-        0
+        // Last index where offsets[i] <= line.
+        let idx = self.offsets.partition_point(|&top| top <= line);
+        idx.saturating_sub(1)
     }
 
     pub fn floors_per_page(&self, first_floor: usize, viewport_h: u16) -> usize {
@@ -174,10 +196,7 @@ impl FloorLayout {
     }
 
     pub fn clamp_scroll_top(&self, scroll_top: DocY, viewport_h: u16) -> DocY {
-        if self.heights.is_empty() || viewport_h == 0 {
-            return 0;
-        }
-        scroll_top.min(self.total.saturating_sub(u32::from(viewport_h)))
+        scroll_top.min(self.max_scroll(viewport_h))
     }
 
     pub fn capture_scroll_anchor(&self, scroll_top: DocY) -> DetailScrollAnchor {
@@ -355,13 +374,11 @@ impl FloorLayout {
 
 fn content_height(post: &Post, body_w: u16, palette: Palette, images: Option<&ImageCache>) -> DocY {
     if let Some(cache) = images {
-        u32::from(
-            layout_post_blocks(post, body_w, palette, cache)
-                .iter()
-                .map(ContentBlock::height)
-                .sum::<u16>()
-                .max(1),
-        )
+        layout_post_blocks(post, body_w, palette, cache)
+            .iter()
+            .map(|b| DocY::from(b.height()))
+            .fold(0u32, DocY::saturating_add)
+            .max(1)
     } else {
         (render_post_content_lines(post, body_w, palette)
             .len()
@@ -396,7 +413,7 @@ pub fn floor_list_total_height(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images).total
+    FloorLayout::build(posts, width, palette, images, 0).total
 }
 
 pub fn floor_offsets(
@@ -405,7 +422,7 @@ pub fn floor_offsets(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> Vec<DocY> {
-    FloorLayout::build(posts, width, palette, images).offsets
+    FloorLayout::build(posts, width, palette, images, 0).offsets
 }
 
 pub fn first_visible_floor(
@@ -415,7 +432,7 @@ pub fn first_visible_floor(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    FloorLayout::build(posts, width, palette, images).first_visible(scroll_top)
+    FloorLayout::build(posts, width, palette, images, 0).first_visible(scroll_top)
 }
 
 /// Anchor for keeping the viewport stable across layout reflows (image decode, append).
@@ -435,7 +452,7 @@ pub fn capture_detail_scroll_anchor(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DetailScrollAnchor {
-    FloorLayout::build(posts, width, palette, images).capture_scroll_anchor(scroll_top)
+    FloorLayout::build(posts, width, palette, images, 0).capture_scroll_anchor(scroll_top)
 }
 
 /// Restore [`DetailScrollAnchor`] after heights changed (e.g. images became Ready).
@@ -447,7 +464,7 @@ pub fn restore_detail_scroll_anchor(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images).restore_scroll_anchor(anchor, viewport_h)
+    FloorLayout::build(posts, width, palette, images, 0).restore_scroll_anchor(anchor, viewport_h)
 }
 
 /// Floor index containing document line `line` (0-based from the list top).
@@ -458,7 +475,7 @@ pub fn floor_index_at_line(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    FloorLayout::build(posts, width, palette, images).floor_index_at_line(line)
+    FloorLayout::build(posts, width, palette, images, 0).floor_index_at_line(line)
 }
 
 /// Last floor with any row inside the viewport `[scroll_top, scroll_top + viewport_h)`.
@@ -470,7 +487,7 @@ pub fn last_visible_floor(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    FloorLayout::build(posts, width, palette, images).last_visible(scroll_top, viewport_h)
+    FloorLayout::build(posts, width, palette, images, 0).last_visible(scroll_top, viewport_h)
 }
 
 /// How many floors fit in one viewport page starting at `first_floor`.
@@ -482,7 +499,7 @@ pub fn floors_per_page(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    FloorLayout::build(posts, width, palette, images).floors_per_page(first_floor, viewport_h)
+    FloorLayout::build(posts, width, palette, images, 0).floors_per_page(first_floor, viewport_h)
 }
 
 pub fn ensure_scroll_top(
@@ -494,7 +511,7 @@ pub fn ensure_scroll_top(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images)
+    FloorLayout::build(posts, width, palette, images, 0)
         .ensure_scroll_top(selected, scroll_top, viewport_h)
 }
 
@@ -506,7 +523,7 @@ pub fn clamp_scroll_top(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images).clamp_scroll_top(scroll_top, viewport_h)
+    FloorLayout::build(posts, width, palette, images, 0).clamp_scroll_top(scroll_top, viewport_h)
 }
 
 /// Maximum `scroll_top` while the viewport bottom aligns with the floor bottom.
@@ -528,7 +545,7 @@ pub fn detail_line_scroll(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images).detail_line_scroll(
+    FloorLayout::build(posts, width, palette, images, 0).detail_line_scroll(
         scroll_top,
         delta_lines,
         viewport_h,
@@ -546,7 +563,7 @@ pub fn detail_step_down(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> (usize, DocY) {
-    FloorLayout::build(posts, width, palette, images)
+    FloorLayout::build(posts, width, palette, images, 0)
         .detail_step_down(selected, scroll_top, viewport_h)
 }
 
@@ -561,7 +578,7 @@ pub fn detail_step_up(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> (usize, DocY) {
-    FloorLayout::build(posts, width, palette, images)
+    FloorLayout::build(posts, width, palette, images, 0)
         .detail_step_up(selected, scroll_top, viewport_h)
 }
 
@@ -574,7 +591,8 @@ pub fn page_scroll_top(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DocY {
-    FloorLayout::build(posts, width, palette, images).page_scroll_top(scroll_top, delta, viewport_h)
+    FloorLayout::build(posts, width, palette, images, 0)
+        .page_scroll_top(scroll_top, delta, viewport_h)
 }
 
 pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListProps<'_>) {
@@ -588,9 +606,10 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
     let viewport_bottom = props.scroll_top.saturating_add(u32::from(area.height));
 
     // Prefer precomputed heights: O(1) jump to first visible floor, no re-wrap for off-screen.
+    // Caller owns revision matching via ensure_detail_layout; here only re-check width.
     let cached = props
         .layout
-        .filter(|l| l.matches(area.width, props.posts.len()));
+        .filter(|l| l.width == area.width && l.floor_count() == props.posts.len());
     let start = cached
         .map(|l| l.first_visible(props.scroll_top))
         .unwrap_or(0);
@@ -1495,7 +1514,7 @@ mod tests {
     fn floor_layout_matches_legacy_helpers() {
         let posts = vec![sample_post(); 40];
         let palette = Palette::default();
-        let layout = FloorLayout::build(&posts, 80, palette, None);
+        let layout = FloorLayout::build(&posts, 80, palette, None, 0);
         assert_eq!(
             layout.total,
             floor_list_total_height(&posts, 80, palette, None)
@@ -1508,38 +1527,53 @@ mod tests {
         );
     }
 
-    /// Cached layout queries stay cheap relative to a full rebuild (regression guard for
-    /// per-frame O(n) re-wrap). Times are machine-dependent; we only assert a large ratio.
+    /// Binary search helpers match linear scan semantics on a tall layout.
     #[test]
-    fn floor_layout_cache_avoids_per_query_rebuild_cost() {
-        use std::time::Instant;
-
-        let posts = vec![sample_post(); 500];
+    fn floor_layout_binary_search_matches_linear_semantics() {
+        let posts = vec![sample_post(); 200];
         let palette = Palette::default();
-        let layout = FloorLayout::build(&posts, 80, palette, None);
+        let layout = FloorLayout::build(&posts, 80, palette, None, 1);
+        assert!(layout.matches(80, 1));
+        assert!(!layout.matches(80, 2));
+        assert!(!layout.matches(100, 1));
 
-        let t0 = Instant::now();
-        for i in 0..200 {
-            let _ = layout.first_visible((i as u32).wrapping_mul(17));
-            let _ = layout.last_visible((i as u32).wrapping_mul(13), 40);
-            let _ = layout.clamp_scroll_top((i as u32).wrapping_mul(11), 40);
+        for scroll in [
+            0u32,
+            1,
+            17,
+            100,
+            999,
+            layout.total.saturating_sub(1),
+            layout.total + 10,
+        ] {
+            // Recompute expected with linear scan over offsets.
+            let mut expected_first = layout.heights.len().saturating_sub(1);
+            for (idx, &top) in layout.offsets.iter().enumerate() {
+                let bottom = top.saturating_add(layout.heights[idx]);
+                if bottom > scroll {
+                    expected_first = idx;
+                    break;
+                }
+            }
+            assert_eq!(
+                layout.first_visible(scroll),
+                expected_first,
+                "scroll={scroll}"
+            );
+
+            let mut expected_at = 0usize;
+            for (idx, &top) in layout.offsets.iter().enumerate().rev() {
+                if scroll >= top {
+                    expected_at = idx;
+                    break;
+                }
+            }
+            assert_eq!(
+                layout.floor_index_at_line(scroll),
+                expected_at,
+                "line={scroll}"
+            );
         }
-        let cached = t0.elapsed();
-
-        let t1 = Instant::now();
-        for i in 0..20 {
-            let scroll = (i as u32).wrapping_mul(17);
-            let _ = first_visible_floor(scroll, &posts, 80, palette, None);
-            let _ = last_visible_floor(scroll, &posts, 80, 40, palette, None);
-            let _ = clamp_scroll_top(scroll, &posts, 80, 40, palette, None);
-        }
-        let rebuilt = t1.elapsed();
-
-        // 200 cached queries vs 20 full rebuilds: cache path should still win by a wide margin.
-        assert!(
-            cached * 5 < rebuilt,
-            "cached {cached:?} should be much cheaper than rebuild path {rebuilt:?}"
-        );
     }
 
     #[test]
@@ -1547,6 +1581,7 @@ mod tests {
         // Synthetic tall single floor: heights sum past u16::MAX must not wrap.
         let layout = FloorLayout {
             width: 80,
+            revision: 0,
             heights: vec![40_000, 40_000],
             offsets: vec![0, 40_000],
             total: 80_000,

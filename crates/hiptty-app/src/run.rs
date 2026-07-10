@@ -157,8 +157,9 @@ impl TerminalGuard {
         if self.restored {
             return;
         }
-        self.restored = true;
+        // Always run best-effort teardown (raw mode must drop even if LeaveAlternateScreen fails).
         let _ = teardown_terminal(&mut self.terminal);
+        self.restored = true;
     }
 }
 
@@ -229,16 +230,19 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 }
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    // Each step is best-effort: a failure mid-way must not skip disable_raw_mode.
     let _ = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::event::PopKeyboardEnhancementFlags
     );
-    crossterm::execute!(
+    let leave_err = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
-    )?;
-    crossterm::terminal::disable_raw_mode()?;
+    );
+    let raw_err = crossterm::terminal::disable_raw_mode();
     let _ = clear_terminal_graphics();
+    leave_err?;
+    raw_err?;
     Ok(())
 }

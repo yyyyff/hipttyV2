@@ -28,10 +28,13 @@ pub enum WorkerRequest {
     LoadThreadDetail {
         tid: String,
         page: u32,
+        request_id: u64,
     },
     FetchImage {
         url: String,
         kind: ImageKind,
+        /// Session epoch captured when the fetch was dispatched; stale after logout/login.
+        session_epoch: u64,
     },
     PreparePost {
         action: PostAction,
@@ -98,11 +101,13 @@ pub enum WorkerResponse {
     ThreadDetailLoaded {
         tid: String,
         page: u32,
+        request_id: u64,
         result: AdapterResult<ThreadDetail>,
     },
     ImageFetched {
         url: String,
         kind: ImageKind,
+        session_epoch: u64,
         result: AdapterResult<Vec<u8>>,
     },
     PrePostReady {
@@ -139,8 +144,9 @@ pub enum WorkerResponse {
         result: AdapterResult<ThreadDetail>,
     },
     UnreadChecked {
-        has_pm: bool,
-        has_notifications: bool,
+        /// `None` when the network check failed; UI must not clear existing unread flags.
+        has_pm: Option<bool>,
+        has_notifications: Option<bool>,
     },
     BlacklistLoaded {
         result: AdapterResult<Vec<String>>,
@@ -162,12 +168,21 @@ pub fn spawn_worker<C: ForumClient + 'static>(
             match req {
                 // App caps in-flight at IMAGE_FETCH_CONCURRENCY; worker must actually
                 // parallelize or the cap is only a queue depth, not HTTP concurrency.
-                WorkerRequest::FetchImage { url, kind } => {
+                WorkerRequest::FetchImage {
+                    url,
+                    kind,
+                    session_epoch,
+                } => {
                     let client = Arc::clone(&client);
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         let result = client.fetch_url(&url).await;
-                        let _ = tx.send(WorkerResponse::ImageFetched { url, kind, result });
+                        let _ = tx.send(WorkerResponse::ImageFetched {
+                            url,
+                            kind,
+                            session_epoch,
+                            result,
+                        });
                     });
                     continue;
                 }
@@ -221,9 +236,18 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                     let result = client.forum_threads(fid, page).await;
                     let _ = tx.send(WorkerResponse::ThreadsLoaded { fid, page, result });
                 }
-                WorkerRequest::LoadThreadDetail { tid, page } => {
+                WorkerRequest::LoadThreadDetail {
+                    tid,
+                    page,
+                    request_id,
+                } => {
                     let result = client.thread_detail(&tid, page).await;
-                    let _ = tx.send(WorkerResponse::ThreadDetailLoaded { tid, page, result });
+                    let _ = tx.send(WorkerResponse::ThreadDetailLoaded {
+                        tid,
+                        page,
+                        request_id,
+                        result,
+                    });
                 }
                 WorkerRequest::PreparePost { action } => {
                     let result = client.prepare_post(action.clone()).await;
@@ -293,10 +317,10 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                     // Run both checks concurrently so offline timeout is one RTT, not two.
                     let (pm_result, notif_result) =
                         tokio::join!(client.check_new_pm(), client.notifications());
-                    let has_pm = pm_result.unwrap_or(false);
+                    let has_pm = pm_result.ok();
                     let has_notifications = notif_result
-                        .map(|list| list.items.iter().any(|i| i.is_new))
-                        .unwrap_or(false);
+                        .ok()
+                        .map(|list| list.items.iter().any(|i| i.is_new));
                     let _ = tx.send(WorkerResponse::UnreadChecked {
                         has_pm,
                         has_notifications,
