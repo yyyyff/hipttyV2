@@ -204,7 +204,8 @@ fn draw_title_row(
         ..area
     });
 
-    let title_line = build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize, mask_cjk);
+    let title_line =
+        build_title_with_icons(thread, cols[0].width.saturating_sub(1) as usize, mask_cjk);
 
     let title_style = if selected {
         palette.selected_style().bg(palette.accent_bg)

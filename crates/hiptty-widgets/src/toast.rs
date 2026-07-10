@@ -90,11 +90,7 @@ pub fn draw_toast(frame: &mut Frame<'_>, area: Rect, props: ToastProps<'_>) {
     frame.render_widget(Paragraph::new(wrapped), inner);
 }
 
-fn fit_toast_text(
-    text: &str,
-    max_inner: usize,
-    style: Style,
-) -> (Vec<Line<'static>>, usize) {
+fn fit_toast_text(text: &str, max_inner: usize, style: Style) -> (Vec<Line<'static>>, usize) {
     let natural = str_width(text);
     let wrap_cols = if natural <= max_inner {
         natural.max(1)
@@ -102,11 +98,7 @@ fn fit_toast_text(
         max_inner
     };
     let lines = wrap_plain(text, wrap_cols, style);
-    let inner_w = lines
-        .iter()
-        .map(line_display_width)
-        .max()
-        .unwrap_or(1);
+    let inner_w = lines.iter().map(line_display_width).max().unwrap_or(1);
     (lines, inner_w)
 }
 
@@ -176,12 +168,7 @@ fn toast_border_cells(area: Rect) -> Vec<(u16, u16, char)> {
     cells
 }
 
-fn draw_toast_border(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    style: Style,
-    remaining_frac: f32,
-) {
+fn draw_toast_border(frame: &mut Frame<'_>, area: Rect, style: Style, remaining_frac: f32) {
     let cells = toast_border_cells(area);
     if cells.is_empty() {
         return;

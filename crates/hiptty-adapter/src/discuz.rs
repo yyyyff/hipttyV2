@@ -54,7 +54,11 @@ impl ForumClient for DiscuzClient {
 
     async fn logout(&self) -> AdapterResult<()> {
         clear_cookie_store(&self.cookie_store)?;
-        self.persist_session()
+        // Persist empty jar so a restart cannot revive the previous session.
+        self.persist_session()?;
+        // Best-effort remove the file; empty jar is already safe if this fails.
+        let _ = std::fs::remove_file(&self.session_path);
+        Ok(())
     }
 
     async fn session_status(&self) -> AdapterResult<SessionInfo> {

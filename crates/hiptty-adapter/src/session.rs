@@ -70,6 +70,8 @@ pub fn migrate_legacy_session(config_dir: &Path, profile: &str) -> Result<(), Ad
             new_path.display()
         ))
     })?;
+    // Preserve private permissions even if the legacy file was world-readable.
+    restrict_permissions(&new_path)?;
     Ok(())
 }
 
@@ -103,7 +105,23 @@ pub fn save_cookie_store(store: &CookieStoreMutex, path: &Path) -> Result<(), Ad
         .lock()
         .map_err(|e| AdapterError::InvalidInput(format!("lock cookie store: {e}")))?;
     json::save(&inner, &mut writer)
-        .map_err(|e| AdapterError::InvalidInput(format!("save session: {e}")))
+        .map_err(|e| AdapterError::InvalidInput(format!("save session: {e}")))?;
+    // Session cookies are credentials: match credentials.json (0600).
+    restrict_permissions(path)
+}
+
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) -> Result<(), AdapterError> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let perms = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, perms)
+        .map_err(|e| AdapterError::InvalidInput(format!("chmod session file: {e}")))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) -> Result<(), AdapterError> {
+    Ok(())
 }
 
 pub fn clear_cookie_store(store: &CookieStoreMutex) -> Result<(), AdapterError> {
@@ -128,5 +146,21 @@ mod tests {
     fn default_config_dir_ends_with_dot_config_hiptty() {
         let dir = config_dir(None).expect("home dir");
         assert!(dir.ends_with(".config/hiptty") || dir.ends_with(".config\\hiptty"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_cookie_store_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("hiptty-session-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("default.session.json");
+        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+        save_cookie_store(&store, &path).expect("save");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "session file must be 0600, got {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

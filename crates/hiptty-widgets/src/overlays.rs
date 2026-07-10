@@ -31,15 +31,7 @@ pub fn draw_main_menu(frame: &mut Frame<'_>, area: Rect, props: MainMenuProps) -
     let width = area.width.min(36);
     // Inner: items + spacer + hints; dialog adds top/bottom border (2 rows).
     let height = (item_rows + 4).min(area.height.saturating_sub(4));
-    let modal = begin_modal(
-        frame,
-        area,
-        props.palette,
-        "菜单",
-        width,
-        height,
-        None,
-    );
+    let modal = begin_modal(frame, area, props.palette, "菜单", width, height, None);
 
     let chunks = Layout::vertical([
         Constraint::Length(item_rows),
@@ -83,7 +75,11 @@ pub struct SettingsProps<'a> {
     pub blacklist_count: usize,
 }
 
-pub fn draw_settings_panel(frame: &mut Frame<'_>, area: Rect, props: SettingsProps<'_>) -> Vec<Rect> {
+pub fn draw_settings_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    props: SettingsProps<'_>,
+) -> Vec<Rect> {
     let width = area.width.min(46);
     let height = 11.min(area.height.saturating_sub(4));
     let modal = begin_modal(

@@ -207,9 +207,13 @@ pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSend
             return;
         }
         "logout" => {
+            // Drop auto-login credentials, clear worker cookie jar + session file, then UI.
             let _ = crate::config::clear_credentials(&app.credentials_path);
+            let _ = worker_tx.send(WorkerRequest::Logout);
             app.session.logged_in = false;
             app.session.username = None;
+            app.session.uid = None;
+            app.unread = crate::app::UnreadState::default();
             app.page = Page::Login;
             app.set_toast("已登出", false);
         }
@@ -321,7 +325,10 @@ fn parse_floor_command(verb: &str) -> Option<FloorCommand> {
 fn is_incomplete_floor_prefix(verb: &str) -> bool {
     let v = verb.to_ascii_lowercase();
     matches!(v.as_str(), "rr" | "r#" | "rr#")
-        || (v.starts_with("r#") && v.len() > 2 && v["r#".len()..].chars().all(|c| c.is_ascii_digit()) && parse_floor_command(&v).is_none())
+        || (v.starts_with("r#")
+            && v.len() > 2
+            && v["r#".len()..].chars().all(|c| c.is_ascii_digit())
+            && parse_floor_command(&v).is_none())
         || (v.starts_with("rr#")
             && v.len() > 3
             && v["rr#".len()..].chars().all(|c| c.is_ascii_digit())
@@ -341,10 +348,7 @@ fn execute_floor_command(
         FloorCommand::Reply(n) | FloorCommand::Quote(n) => n,
     };
     let Some((idx, post)) = find_loaded_floor(app, floor) else {
-        app.set_toast(
-            format!("找不到 #{floor} 楼（可能尚未加载到本地）"),
-            true,
-        );
+        app.set_toast(format!("找不到 #{floor} 楼（可能尚未加载到本地）"), true);
         return;
     };
 
@@ -397,11 +401,10 @@ pub fn command_suggestion_strip(input: &str, max_cols: usize, page: Page) -> Str
         if token_l.is_empty() {
             // Prefer reply family, then other detail-visible catalog entries (skip duplicate bare `r`).
             return join_usages(
-                DETAIL_REPLY_USAGES.iter().copied().chain(
-                    catalog_for(page)
-                        .filter(|s| s.name != "r")
-                        .map(|s| s.usage),
-                ),
+                DETAIL_REPLY_USAGES
+                    .iter()
+                    .copied()
+                    .chain(catalog_for(page).filter(|s| s.name != "r").map(|s| s.usage)),
                 max_cols,
             );
         }
@@ -428,8 +431,7 @@ pub fn command_suggestion_strip(input: &str, max_cols: usize, page: Page) -> Str
     } else {
         catalog_for(page)
             .filter(|s| {
-                s.name.starts_with(&token_l)
-                    || s.aliases.iter().any(|a| a.starts_with(&token_l))
+                s.name.starts_with(&token_l) || s.aliases.iter().any(|a| a.starts_with(&token_l))
             })
             .collect()
     };
@@ -469,10 +471,7 @@ pub fn tab_complete_command(input: &mut String, cursor: &mut usize, page: Page) 
     }
 
     let matches: Vec<&str> = catalog_for(page)
-        .filter(|s| {
-            s.name.starts_with(prefix)
-                || s.aliases.iter().any(|a| a.starts_with(prefix))
-        })
+        .filter(|s| s.name.starts_with(prefix) || s.aliases.iter().any(|a| a.starts_with(prefix)))
         .map(|s| s.name)
         .collect();
 
@@ -613,7 +612,11 @@ mod tests {
     fn tab_completes_unique_prefix() {
         let mut input = "logou".to_string();
         let mut cursor = 5;
-        assert!(tab_complete_command(&mut input, &mut cursor, Page::ThreadFeed));
+        assert!(tab_complete_command(
+            &mut input,
+            &mut cursor,
+            Page::ThreadFeed
+        ));
         assert_eq!(input, "logout");
     }
 
@@ -621,7 +624,11 @@ mod tests {
     fn tab_extends_common_prefix() {
         let mut input = "l".to_string();
         let mut cursor = 1;
-        assert!(tab_complete_command(&mut input, &mut cursor, Page::ThreadFeed));
+        assert!(tab_complete_command(
+            &mut input,
+            &mut cursor,
+            Page::ThreadFeed
+        ));
         // login + logout share "log"
         assert_eq!(input, "log");
     }
@@ -630,7 +637,11 @@ mod tests {
     fn tab_search_appends_space() {
         let mut input = "sear".to_string();
         let mut cursor = 4;
-        assert!(tab_complete_command(&mut input, &mut cursor, Page::ThreadFeed));
+        assert!(tab_complete_command(
+            &mut input,
+            &mut cursor,
+            Page::ThreadFeed
+        ));
         assert_eq!(input, "search ");
     }
 
@@ -678,6 +689,8 @@ mod tests {
     fn feed_hides_detail_only_r() {
         let strip = command_suggestion_strip("", 80, Page::ThreadFeed);
         // Bare `r` 回帖 is detail-only; feed may still show "refresh".
-        assert!(!strip.split(" · ").any(|p| p == "r" || p.starts_with("r 回帖")));
+        assert!(!strip
+            .split(" · ")
+            .any(|p| p == "r" || p.starts_with("r 回帖")));
     }
 }

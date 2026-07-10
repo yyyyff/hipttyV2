@@ -12,6 +12,10 @@ use reqwest_cookie_store::CookieStoreMutex;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Hard cap for `get_bytes` (avatars / smilies / content images). Prevents unbounded
+/// memory when Content-Length is missing or hostile.
+pub const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client,
@@ -57,6 +61,7 @@ impl HttpClient {
     }
 
     pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AdapterError> {
+        validate_http_url(url)?;
         let response = self
             .inner
             .get(url)
@@ -66,12 +71,39 @@ impl HttpClient {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(AdapterError::NotFound(url.to_string()));
         }
-        let response = Self::check_status(response)?;
-        response
-            .bytes()
-            .await
-            .map_err(|e| AdapterError::Network(e.to_string()))
-            .map(|b| b.to_vec())
+        let mut response = Self::check_status(response)?;
+        if let Some(len) = response.content_length() {
+            if len > MAX_DOWNLOAD_BYTES {
+                return Err(AdapterError::InvalidInput(format!(
+                    "image too large: Content-Length {len} > {MAX_DOWNLOAD_BYTES}"
+                )));
+            }
+        }
+        // Stream with a hard cap so missing/lying Content-Length cannot OOM us.
+        let mut buf = Vec::new();
+        if let Some(len) = response.content_length() {
+            let cap = usize::try_from(len)
+                .unwrap_or(usize::MAX)
+                .min(MAX_DOWNLOAD_BYTES as usize);
+            buf.reserve(cap);
+        }
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(|e| AdapterError::Network(e.to_string()))?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let next = buf.len() as u64 + chunk.len() as u64;
+            if next > MAX_DOWNLOAD_BYTES {
+                return Err(AdapterError::InvalidInput(format!(
+                    "image too large: exceeded {MAX_DOWNLOAD_BYTES} bytes while streaming"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
     }
 
     pub async fn post_form(
@@ -200,4 +232,34 @@ fn content_type_header(response: &Response) -> Option<String> {
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
+}
+
+/// Image fetches only: reject non-HTTP(S) schemes (file:, data:, etc.).
+fn validate_http_url(url: &str) -> Result<(), AdapterError> {
+    let trimmed = url.trim();
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        Ok(())
+    } else {
+        Err(AdapterError::InvalidInput(format!(
+            "unsupported image URL scheme (need http/https): {url}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_http_url_accepts_http_https() {
+        assert!(validate_http_url("https://img02.4d4y.com/a.jpg").is_ok());
+        assert!(validate_http_url("http://example.com/x.png").is_ok());
+    }
+
+    #[test]
+    fn validate_http_url_rejects_other_schemes() {
+        assert!(validate_http_url("file:///etc/passwd").is_err());
+        assert!(validate_http_url("data:image/png;base64,xx").is_err());
+        assert!(validate_http_url("/relative/path.jpg").is_err());
+    }
 }

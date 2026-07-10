@@ -42,9 +42,7 @@ pub fn mask_line_cjk(line: ratatui::text::Line<'_>, mask: bool) -> ratatui::text
     ratatui::text::Line::from(
         line.spans
             .iter()
-            .map(|span| {
-                ratatui::text::Span::styled(mask_cjk(span.content.as_ref()), span.style)
-            })
+            .map(|span| ratatui::text::Span::styled(mask_cjk(span.content.as_ref()), span.style))
             .collect::<Vec<_>>(),
     )
 }
@@ -109,9 +107,7 @@ pub fn format_relative_time_at(raw: &str, now: DateTime<Local>) -> String {
 /// Strip Discuz `发表于` label if the raw field still carries it.
 pub fn strip_published_prefix(raw: &str) -> &str {
     let t = raw.trim();
-    t.strip_prefix("发表于")
-        .map(str::trim)
-        .unwrap_or(t)
+    t.strip_prefix("发表于").map(str::trim).unwrap_or(t)
 }
 
 fn is_already_relative(raw: &str) -> bool {

@@ -5,11 +5,9 @@ use hiptty_core::{
 use hiptty_image::{AvatarDiskCache, FetchRequest, ImageCache};
 use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
-    capture_detail_scroll_anchor, clamp_scroll_top, ensure_scroll_top, forum_picker_entries,
-    restore_detail_scroll_anchor,
-    loading_status_label, page_status_label, snap_scroll_to_item, thread_list_capacity, KeyHint,
-    LoginField, ScrollBarInteraction, ScrollChrome, TitleBarHits, TOAST_ERROR_TICKS,
-    TOAST_SUCCESS_TICKS, SCROLLBAR_COLS,
+    forum_picker_entries, loading_status_label, page_status_label, snap_scroll_to_item,
+    thread_list_capacity, FloorLayout, KeyHint, LoginField, ScrollBarInteraction, ScrollChrome,
+    TitleBarHits, SCROLLBAR_COLS, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -24,7 +22,7 @@ use crate::worker::WorkerRequest;
 struct GraphicsLayoutKey {
     page: Page,
     overlay: Overlay,
-    detail_scroll: u16,
+    detail_scroll: u32,
     feed_scroll: u16,
     list_scroll: u16,
     pm_scroll: u16,
@@ -120,6 +118,9 @@ pub struct OverlayState {
 pub struct UnreadState {
     pub has_pm: bool,
     pub has_notifications: bool,
+    /// True while a `CheckUnread` request is queued or running in the worker.
+    /// Prevents unbounded pile-up when the network is slow/offline.
+    pub check_in_flight: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -168,11 +169,14 @@ pub struct DetailState {
     pub view_count: Option<String>,
     pub detail: Option<ThreadDetail>,
     pub selected: usize,
-    pub scroll_top: u16,
+    pub scroll_top: u32,
     pub loading: bool,
     pub loading_more: bool,
     pub pending_fetch: Option<DetailFetchMode>,
     pub error: Option<String>,
+    /// Cached floor heights/offsets for the current posts + width + image states.
+    /// Invalidated when posts change, terminal width changes, or images decode.
+    pub layout: Option<FloorLayout>,
 }
 
 impl DetailState {
@@ -190,7 +194,12 @@ impl DetailState {
             loading_more: false,
             pending_fetch: None,
             error: None,
+            layout: None,
         }
+    }
+
+    pub fn invalidate_layout(&mut self) {
+        self.layout = None;
     }
 }
 
@@ -291,6 +300,7 @@ impl App {
                 loading_more: false,
                 pending_fetch: None,
                 error: None,
+                layout: None,
             },
             forum_picker_selected: 0,
             forum_picker_scroll: 0,
@@ -388,10 +398,7 @@ impl App {
         self.pump_image_fetch_queue(worker_tx);
     }
 
-    pub fn on_image_fetch_finished(
-        &mut self,
-        worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
-    ) {
+    pub fn on_image_fetch_finished(&mut self, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
         self.image_fetches_in_flight = self.image_fetches_in_flight.saturating_sub(1);
         self.pump_image_fetch_queue(worker_tx);
     }
@@ -471,10 +478,9 @@ impl App {
     }
 
     pub fn poll_toast(&mut self) {
-        let expired = self
-            .toast
-            .as_ref()
-            .is_some_and(|toast| self.tick >= toast.started_at.saturating_add(toast.duration_ticks));
+        let expired = self.toast.as_ref().is_some_and(|toast| {
+            self.tick >= toast.started_at.saturating_add(toast.duration_ticks)
+        });
         if expired {
             self.toast = None;
         }
@@ -734,76 +740,80 @@ impl App {
             snap_scroll_to_item(self.feed.selected, self.feed.scroll_lines, viewport, item_h);
     }
 
+    /// Drop cached floor layout (posts / image heights changed).
+    pub fn invalidate_detail_layout(&mut self) {
+        self.detail.invalidate_layout();
+    }
+
+    /// Ensure [`DetailState::layout`] matches current posts, content width, and image heights.
+    pub fn ensure_detail_layout(&mut self) {
+        let width = self.content_width();
+        let post_count = self
+            .detail
+            .detail
+            .as_ref()
+            .map(|d| d.posts.len())
+            .unwrap_or(0);
+        if post_count == 0 {
+            self.detail.layout = None;
+            return;
+        }
+        if self
+            .detail
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.matches(width, post_count))
+        {
+            return;
+        }
+        let palette = self.palette();
+        let images = self.images();
+        let posts = self
+            .detail
+            .detail
+            .as_ref()
+            .map(|d| d.posts.as_slice())
+            .unwrap_or(&[]);
+        self.detail.layout = Some(FloorLayout::build(posts, width, palette, images));
+    }
+
+    /// Borrow the cached layout, rebuilding if stale.
+    pub fn detail_layout(&mut self) -> Option<&FloorLayout> {
+        self.ensure_detail_layout();
+        self.detail.layout.as_ref()
+    }
+
     /// Keep the mid-floor scroll position after layout reflows (append, image decode).
     ///
     /// Anchors `(first_visible_floor, offset_within_floor)` rather than snapping to the floor
     /// top — otherwise j/k or wheel mid-floor jumps back when images become Ready.
     pub fn preserve_detail_scroll(&mut self) {
-        let Some(detail) = &self.detail.detail else {
+        // Posts may have grown; rebuild once, then re-clamp the same document line anchor.
+        self.invalidate_detail_layout();
+        let Some(layout) = self.detail_layout().cloned() else {
             return;
         };
-        if detail.posts.is_empty() {
-            return;
-        }
         let viewport = self.scroll_viewport_height();
-        let width = self.content_width();
-        let palette = self.palette();
-        let images = self.images();
-        let anchor = capture_detail_scroll_anchor(
-            self.detail.scroll_top,
-            &detail.posts,
-            width,
-            palette,
-            images,
-        );
-        self.detail.scroll_top = restore_detail_scroll_anchor(
-            anchor,
-            &detail.posts,
-            width,
-            viewport,
-            palette,
-            images,
-        );
+        let anchor = layout.capture_scroll_anchor(self.detail.scroll_top);
+        self.detail.scroll_top = layout.restore_scroll_anchor(anchor, viewport);
     }
 
     /// Capture scroll anchor using *current* image heights (call before cache.poll).
-    pub fn capture_detail_scroll_anchor(&self) -> Option<hiptty_widgets::DetailScrollAnchor> {
-        let detail = self.detail.detail.as_ref()?;
-        if detail.posts.is_empty() {
-            return None;
-        }
-        Some(capture_detail_scroll_anchor(
-            self.detail.scroll_top,
-            &detail.posts,
-            self.content_width(),
-            self.palette(),
-            self.images(),
-        ))
+    pub fn capture_detail_scroll_anchor(&mut self) -> Option<hiptty_widgets::DetailScrollAnchor> {
+        let scroll_top = self.detail.scroll_top;
+        let layout = self.detail_layout()?;
+        Some(layout.capture_scroll_anchor(scroll_top))
     }
 
     /// Restore a previously captured anchor after heights changed.
-    pub fn restore_detail_scroll_anchor(
-        &mut self,
-        anchor: hiptty_widgets::DetailScrollAnchor,
-    ) {
-        let Some(detail) = &self.detail.detail else {
+    pub fn restore_detail_scroll_anchor(&mut self, anchor: hiptty_widgets::DetailScrollAnchor) {
+        self.invalidate_detail_layout();
+        let viewport = self.scroll_viewport_height();
+        let Some(layout) = self.detail_layout() else {
             return;
         };
-        if detail.posts.is_empty() {
-            return;
-        }
-        let viewport = self.scroll_viewport_height();
-        let width = self.content_width();
-        let palette = self.palette();
-        let images = self.images();
-        self.detail.scroll_top = restore_detail_scroll_anchor(
-            anchor,
-            &detail.posts,
-            width,
-            viewport,
-            palette,
-            images,
-        );
+        let next = layout.restore_scroll_anchor(anchor, viewport);
+        self.detail.scroll_top = next;
     }
 
     /// Content width below title/status, reserving the scrollbar column when possible.
@@ -843,32 +853,16 @@ impl App {
     }
 
     pub fn sync_detail_scroll(&mut self) {
-        let Some(detail) = &self.detail.detail else {
+        let viewport = self.scroll_viewport_height();
+        let selected = self.detail.selected;
+        let scroll_top = self.detail.scroll_top;
+        // Width change must rebuild; ensure_detail_layout checks width/count.
+        let Some(layout) = self.detail_layout() else {
             return;
         };
-        if detail.posts.is_empty() {
-            return;
-        }
-        let viewport = self.scroll_viewport_height();
-        let width = self.content_width();
-        let palette = self.palette();
-        let images = self.images();
-        self.detail.scroll_top = clamp_scroll_top(
-            ensure_scroll_top(
-                self.detail.selected,
-                self.detail.scroll_top,
-                &detail.posts,
-                width,
-                viewport,
-                palette,
-                images,
-            ),
-            &detail.posts,
-            width,
-            viewport,
-            palette,
-            images,
-        );
+        let next = layout.ensure_scroll_top(selected, scroll_top, viewport);
+        let next = layout.clamp_scroll_top(next, viewport);
+        self.detail.scroll_top = next;
     }
 
     pub fn startup_message(&self) -> &'static str {

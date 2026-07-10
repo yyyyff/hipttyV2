@@ -159,12 +159,14 @@ TUI 应用核心：状态机、事件循环、绘制编排。
 |------|------|
 | `~/.config/hiptty/` | 默认配置目录（可用 `--config` / `HIPTTY_CONFIG` 覆盖） |
 | `settings.json` | UI 设置（主题等） |
-| `{profile}.credentials.json` | 登录凭证（MD5 密码 + 密保） |
-| `{profile}.session.json` | HTTP cookie 会话 |
+| `{profile}.credentials.json` | 登录凭证（MD5 密码 + 密保）；Unix 写入后权限 `0600` |
+| `{profile}.session.json` | HTTP cookie 会话；Unix 写入后权限 `0600` |
 
 Profile 默认 `default`，可通过 `--profile` / `HIPTTY_PROFILE` 切换。
 
 macOS 会自动迁移旧路径 `~/Library/Application Support/hiptty/`。
+
+登录后 TUI 约每 30 秒检查一次未读私信/通知；若上一轮仍在 worker 中则跳过，避免断网时请求积压。
 
 ---
 

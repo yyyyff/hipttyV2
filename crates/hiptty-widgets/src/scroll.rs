@@ -123,20 +123,20 @@ pub fn snap_scroll_to_item(
 pub struct ScrollChrome {
     pub content: Rect,
     pub bar: Rect,
-    pub content_len: u16,
+    pub content_len: u32,
     pub viewport_len: u16,
-    pub offset: u16,
+    pub offset: u32,
     pub shown: bool,
 }
 
 impl ScrollChrome {
-    pub fn max_offset(&self) -> u16 {
-        max_scroll_lines(self.content_len, self.viewport_len)
+    pub fn max_offset(&self) -> u32 {
+        max_scroll_lines_u32(self.content_len, self.viewport_len)
     }
 
-    pub fn apply_command(&self, command: ScrollCommand) -> u16 {
+    pub fn apply_command(&self, command: ScrollCommand) -> u32 {
         let ScrollCommand::SetOffset(offset) = command;
-        offset.min(self.max_offset() as usize) as u16
+        (offset as u32).min(self.max_offset())
     }
 
     pub fn lengths(&self) -> ScrollLengths {
@@ -147,12 +147,22 @@ impl ScrollChrome {
     }
 }
 
+/// Document-length aware max scroll (detail floors can exceed `u16::MAX` rows).
+pub fn max_scroll_lines_u32(content_lines: u32, viewport_h: u16) -> u32 {
+    content_lines.saturating_sub(u32::from(viewport_h))
+}
+
+pub fn apply_scroll_delta_u32(offset: u32, delta: i32, max: u32) -> u32 {
+    let next = i64::from(offset) + i64::from(delta);
+    next.clamp(0, i64::from(max)) as u32
+}
+
 pub fn draw_vertical_scrollbar(
     frame: &mut Frame<'_>,
     bar_area: Rect,
     palette: Palette,
     lengths: ScrollLengths,
-    offset: u16,
+    offset: u32,
 ) {
     if bar_area.width == 0 || bar_area.height == 0 {
         return;

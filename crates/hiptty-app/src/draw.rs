@@ -4,9 +4,9 @@ use hiptty_widgets::{
     draw_composer, draw_confirm_dialog, draw_dim_rule, draw_floor_list, draw_forum_picker,
     draw_login, draw_main_menu, draw_pm_thread, draw_search_prompt, draw_settings_panel,
     draw_simple_list, draw_startup, draw_status_bar, draw_thread_list, draw_title_bar, draw_toast,
-    draw_vertical_scrollbar, list_content_lines, main_layout, title_bar_hits, ComposerProps,
-    ConfirmProps, FloorListProps, ForumPickerProps, ForumTabsProps, LoginFormProps, MainMenuProps,
-    CommandLineProps, PmThreadProps, SearchPromptProps, SettingsProps, SimpleListProps, StartupProps,
+    draw_vertical_scrollbar, list_content_lines, main_layout, title_bar_hits, CommandLineProps,
+    ComposerProps, ConfirmProps, FloorListProps, ForumPickerProps, ForumTabsProps, LoginFormProps,
+    MainMenuProps, PmThreadProps, SearchPromptProps, SettingsProps, SimpleListProps, StartupProps,
     StatusBarProps, ThreadListProps, TitleBarProps, ToastProps, ITEM_HEIGHT, PM_ITEM_HEIGHT,
     SIMPLE_ITEM_HEIGHT,
 };
@@ -22,6 +22,7 @@ use crate::mouse::install_scroll_chrome;
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     // Decode completion changes content heights; re-anchor mid-floor scroll, not floor tops.
+    // Capture uses cached FloorLayout (cheap); only rebuild after poll reports changes.
     let scroll_anchor = if app.page == Page::ThreadDetail {
         app.capture_detail_scroll_anchor()
     } else {
@@ -29,6 +30,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     };
     let images_changed = app.images_mut().map(|cache| cache.poll()).unwrap_or(false);
     if images_changed {
+        app.invalidate_detail_layout();
         if let Some(anchor) = scroll_anchor {
             app.restore_detail_scroll_anchor(anchor);
         }
@@ -262,13 +264,19 @@ fn paint_scroll_area(
     frame: &mut Frame<'_>,
     app: &mut App,
     full_content: Rect,
-    content_len: u16,
-    offset: u16,
+    content_len: u32,
+    offset: u32,
 ) -> Rect {
     let content = install_scroll_chrome(app, full_content, content_len, offset);
     if let Some(chrome) = app.scroll_chrome {
         if chrome.shown {
-            draw_vertical_scrollbar(frame, chrome.bar, app.content_palette(), chrome.lengths(), offset);
+            draw_vertical_scrollbar(
+                frame,
+                chrome.bar,
+                app.content_palette(),
+                chrome.lengths(),
+                offset,
+            );
         }
     }
     content
@@ -323,8 +331,14 @@ fn draw_feed_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     shell_title_bar(frame, app, title_area, None);
     draw_dim_rule(frame, title_rule, palette);
 
-    let content_len = list_content_lines(app.feed.threads.len(), ITEM_HEIGHT);
-    let content = paint_scroll_area(frame, app, content_area, content_len, app.feed.scroll_lines);
+    let content_len = u32::from(list_content_lines(app.feed.threads.len(), ITEM_HEIGHT));
+    let content = paint_scroll_area(
+        frame,
+        app,
+        content_area,
+        content_len,
+        u32::from(app.feed.scroll_lines),
+    );
     {
         let feed = &app.feed;
         let images = app.image_cache.as_mut();
@@ -382,19 +396,16 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     draw_dim_rule(frame, chunks[1], palette);
 
     let (pre_content, _) = hiptty_widgets::split_content_scrollbar(chunks[2]);
-    let detail_content_len = app
+    // Ensure layout matches the scrollbar column width used for drawing.
+    if app
         .detail
-        .detail
+        .layout
         .as_ref()
-        .map(|detail| {
-            hiptty_widgets::floor_list_total_height(
-                &detail.posts,
-                pre_content.width.max(1),
-                palette,
-                app.image_cache.as_ref(),
-            )
-        })
-        .unwrap_or(0);
+        .is_none_or(|l| l.width != pre_content.width.max(1))
+    {
+        app.invalidate_detail_layout();
+    }
+    let detail_content_len = app.detail_layout().map(|l| l.total).unwrap_or(0);
     let content = paint_scroll_area(
         frame,
         app,
@@ -404,9 +415,13 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     {
-        let detail_state = &app.detail;
+        // Rebuild layout before splitting borrows for draw.
+        app.ensure_detail_layout();
+        let selected = app.detail.selected;
+        let scroll_top = app.detail.scroll_top;
+        let layout = app.detail.layout.as_ref();
         let images = app.image_cache.as_mut();
-        if let Some(detail) = &detail_state.detail {
+        if let Some(detail) = app.detail.detail.as_ref() {
             // Keep existing floors visible while reloading; loading is shown in status bar.
             draw_floor_list(
                 frame,
@@ -414,11 +429,12 @@ fn draw_detail_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 FloorListProps {
                     palette,
                     posts: &detail.posts,
-                    selected: detail_state.selected,
-                    scroll_top: detail_state.scroll_top,
+                    selected,
+                    scroll_top,
                     show_avatar: true,
                     images,
                     mask_cjk,
+                    layout,
                 },
             );
         }
@@ -437,13 +453,16 @@ fn draw_simple_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
 
-    let content_len = list_content_lines(app.list_page.items.len(), SIMPLE_ITEM_HEIGHT);
+    let content_len = u32::from(list_content_lines(
+        app.list_page.items.len(),
+        SIMPLE_ITEM_HEIGHT,
+    ));
     let content = paint_scroll_area(
         frame,
         app,
         chunks[2],
         content_len,
-        app.list_page.scroll_lines,
+        u32::from(app.list_page.scroll_lines),
     );
     let images = app.image_cache.as_mut();
     draw_simple_list(
@@ -479,13 +498,13 @@ fn draw_thread_list_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect, show
         .iter()
         .map(list_item_to_thread_summary)
         .collect();
-    let content_len = list_content_lines(app.list_page.items.len(), ITEM_HEIGHT);
+    let content_len = u32::from(list_content_lines(app.list_page.items.len(), ITEM_HEIGHT));
     let content = paint_scroll_area(
         frame,
         app,
         chunks[2],
         content_len,
-        app.list_page.scroll_lines,
+        u32::from(app.list_page.scroll_lines),
     );
     let images = app.image_cache.as_mut();
     draw_thread_list(
@@ -516,13 +535,16 @@ fn draw_pm_thread_shell(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     shell_title_bar(frame, app, chunks[0], None);
     draw_dim_rule(frame, chunks[1], palette);
 
-    let content_len = list_content_lines(app.pm_thread.messages.len(), PM_ITEM_HEIGHT);
+    let content_len = u32::from(list_content_lines(
+        app.pm_thread.messages.len(),
+        PM_ITEM_HEIGHT,
+    ));
     let content = paint_scroll_area(
         frame,
         app,
         chunks[2],
         content_len,
-        app.pm_thread.scroll_lines,
+        u32::from(app.pm_thread.scroll_lines),
     );
     draw_pm_thread(
         frame,
@@ -561,5 +583,3 @@ fn draw_list_error(
         );
     }
 }
-
-

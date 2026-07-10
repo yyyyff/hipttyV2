@@ -181,10 +181,7 @@ fn hints_line(hints: &[KeyHint], palette: Palette) -> Line<'static> {
         if i > 0 {
             spans.push(Span::styled("  ".to_string(), palette.muted_style()));
         }
-        spans.push(Span::styled(
-            hint.key.to_string(),
-            palette.accent_style(),
-        ));
+        spans.push(Span::styled(hint.key.to_string(), palette.accent_style()));
         if !hint.label.is_empty() {
             spans.push(Span::styled(
                 format!(" {}", hint.label),

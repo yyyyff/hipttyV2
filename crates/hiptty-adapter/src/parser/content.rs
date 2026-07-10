@@ -442,9 +442,7 @@ fn parse_pure_quote_meta_line(header: &str) -> Option<(Option<String>, Option<St
 }
 
 /// Extract author/time from leading meta, then drop every pure meta line (incl. trailing).
-fn extract_and_strip_quote_meta(
-    text: &str,
-) -> (Option<String>, Option<String>, String) {
+fn extract_and_strip_quote_meta(text: &str) -> (Option<String>, Option<String>, String) {
     let mut author = None;
     let mut time = None;
     let mut rest = text.to_string();
@@ -474,9 +472,7 @@ fn extract_and_strip_quote_meta(
 }
 
 /// Split body when a header is present at the start (possibly glued to body on one line).
-fn split_leading_quote_header(
-    text: &str,
-) -> Option<(Option<String>, Option<String>, String)> {
+fn split_leading_quote_header(text: &str) -> Option<(Option<String>, Option<String>, String)> {
     let trimmed = text.trim_start();
     let first_line_end = trimmed.find('\n').unwrap_or(trimmed.len());
     let first = trimmed[..first_line_end].trim();
@@ -862,10 +858,7 @@ mod tests {
             .iter()
             .find_map(|n| match n {
                 ContentNode::Quote {
-                    author,
-                    time,
-                    text,
-                    ..
+                    author, time, text, ..
                 } => Some((author.clone(), time.clone(), text.clone())),
                 _ => None,
             })
@@ -892,10 +885,7 @@ hello world</blockquote></div></div>"#,
             .iter()
             .find_map(|n| match n {
                 ContentNode::Quote {
-                    author,
-                    time,
-                    text,
-                    ..
+                    author, time, text, ..
                 } => Some((author.clone(), time.clone(), text.clone())),
                 _ => None,
             })
@@ -922,10 +912,7 @@ hello world</blockquote></div></div>"#,
             .iter()
             .find_map(|n| match n {
                 ContentNode::Quote {
-                    author,
-                    time,
-                    text,
-                    ..
+                    author, time, text, ..
                 } => Some((author.clone(), time.clone(), text.clone())),
                 _ => None,
             })
@@ -969,7 +956,10 @@ hello world</blockquote></div></div>"#,
                 _ => None,
             })
             .expect("text");
-        assert!(text.contains("感受 文中") || text.contains("感受  文中"), "got {text:?}");
+        assert!(
+            text.contains("感受 文中") || text.contains("感受  文中"),
+            "got {text:?}"
+        );
     }
 
     #[test]

@@ -91,11 +91,21 @@ struct DecodeOutput {
     size: Size,
 }
 
+/// Cap in-memory decoded images (protocol payloads are heavy). FIFO among
+/// non-`Loading` entries so long browsing sessions stay bounded.
+pub const MAX_MEMORY_ENTRIES: usize = 256;
+
+/// Reject decompression bombs / absurd pixel grids after decode.
+pub const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024; // 16 MP
+pub const MAX_DECODE_SIDE: u32 = 8192;
+
 pub struct ImageCache {
     picker: Picker,
     avatar_disk: Option<AvatarDiskCache>,
     avatar_placeholder: Option<ImageEntry>,
     entries: HashMap<String, ImageEntry>,
+    /// Insertion/access order for eviction (oldest at front).
+    order: VecDeque<String>,
     job_tx: DecodeJobTx,
     result_rx: Receiver<DecodeResult>,
 }
@@ -181,8 +191,7 @@ impl ImageCache {
             let worker_picker = picker.clone();
             thread::spawn(move || {
                 while let Some(job) = queue.pop() {
-                    let result =
-                        decode_image(&worker_picker, job.kind, &job.bytes).map_err(|_| ());
+                    let result = decode_image(&worker_picker, job.kind, &job.bytes).map_err(|_| ());
                     let _ = result_tx.send(DecodeResult {
                         url: job.url,
                         kind: job.kind,
@@ -203,11 +212,16 @@ impl ImageCache {
                 })
         });
 
+        if let Some(disk) = avatar_disk.as_ref() {
+            let _ = disk.purge();
+        }
+
         Self {
             picker,
             avatar_disk,
             avatar_placeholder,
             entries: HashMap::new(),
+            order: VecDeque::new(),
             job_tx,
             result_rx,
         }
@@ -253,14 +267,18 @@ impl ImageCache {
                 (ImageState::Ready { width, height, .. }, ImageKind::Avatar)
                     if avatar_dimensions_match(*width, *height) =>
                 {
-                    return false
+                    self.touch(&url);
+                    return false;
                 }
                 (ImageState::Ready { .. }, ImageKind::Avatar) => {
-                    self.entries.remove(&url);
+                    self.remove_entry(&url);
                 }
-                (ImageState::Ready { .. }, _) => return false,
+                (ImageState::Ready { .. }, _) => {
+                    self.touch(&url);
+                    return false;
+                }
                 (ImageState::Failed, ImageKind::Avatar | ImageKind::Content { .. }) => {
-                    self.entries.remove(&url);
+                    self.remove_entry(&url);
                 }
                 _ => {}
             }
@@ -274,7 +292,7 @@ impl ImageCache {
                             false
                         }
                         AvatarDiskEntry::NotFound => {
-                            self.entries.insert(
+                            self.insert_entry(
                                 url,
                                 ImageEntry {
                                     state: ImageState::Failed,
@@ -287,7 +305,7 @@ impl ImageCache {
                 }
             }
         }
-        self.entries.insert(
+        self.insert_entry(
             url.clone(),
             ImageEntry {
                 state: ImageState::Loading,
@@ -323,7 +341,7 @@ impl ImageCache {
         if url.is_empty() {
             return;
         }
-        self.entries.insert(
+        self.insert_entry(
             url.clone(),
             ImageEntry {
                 state: ImageState::Loading,
@@ -336,6 +354,7 @@ impl ImageCache {
     pub fn mark_failed(&mut self, url: &str) {
         if let Some(entry) = self.entries.get_mut(url) {
             entry.state = ImageState::Failed;
+            self.touch(url);
         }
     }
 
@@ -348,7 +367,7 @@ impl ImageCache {
                 Ok(out) => ready_state(out),
                 Err(()) => ImageState::Failed,
             };
-            self.entries.insert(
+            self.insert_entry(
                 result.url,
                 ImageEntry {
                     state,
@@ -357,6 +376,47 @@ impl ImageCache {
             );
         }
         changed
+    }
+
+    fn touch(&mut self, url: &str) {
+        if !self.entries.contains_key(url) {
+            return;
+        }
+        self.order.retain(|u| u != url);
+        self.order.push_back(url.to_string());
+    }
+
+    fn insert_entry(&mut self, url: String, entry: ImageEntry) {
+        if self.entries.insert(url.clone(), entry).is_none() {
+            self.order.push_back(url);
+        } else {
+            self.touch(&url);
+        }
+        self.evict_overflow();
+    }
+
+    fn remove_entry(&mut self, url: &str) {
+        self.entries.remove(url);
+        self.order.retain(|u| u != url);
+    }
+
+    fn evict_overflow(&mut self) {
+        while self.entries.len() > MAX_MEMORY_ENTRIES {
+            let Some(victim) = self
+                .order
+                .iter()
+                .find(|u| {
+                    self.entries
+                        .get(*u)
+                        .is_some_and(|e| !matches!(e.state, ImageState::Loading))
+                })
+                .cloned()
+            else {
+                // All remaining entries are Loading — wait for decode/fail.
+                break;
+            };
+            self.remove_entry(&victim);
+        }
     }
 
     fn refresh_stale_avatars(&mut self) -> bool {
@@ -378,7 +438,7 @@ impl ImageCache {
             return false;
         }
         for url in stale {
-            self.entries.remove(&url);
+            self.remove_entry(&url);
             if let Some(disk) = self.avatar_disk.as_ref() {
                 if let Some(AvatarDiskEntry::Bytes(bytes)) = disk.load(&url) {
                     self.ingest_bytes(url, ImageKind::Avatar, bytes);
@@ -397,12 +457,43 @@ fn avatar_dimensions_match(width: u16, height: u16) -> bool {
 }
 
 fn decode_dynamic_image(bytes: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
-    let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    // ~64 MiB decoded RGBA budget (plus image crate overhead).
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
     match reader.decode() {
-        Ok(img) => Ok(img),
-        Err(_) if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => image::load_from_memory(bytes),
+        Ok(img) => {
+            check_decoded_bounds(&img)?;
+            Ok(img)
+        }
+        Err(_) if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => {
+            // Fallback path for odd JPEG headers; still enforce pixel budget.
+            let img = image::load_from_memory(bytes)?;
+            check_decoded_bounds(&img)?;
+            Ok(img)
+        }
         Err(err) => Err(err),
     }
+}
+
+fn check_decoded_bounds(img: &image::DynamicImage) -> Result<(), image::ImageError> {
+    let w = img.width();
+    let h = img.height();
+    if w > MAX_DECODE_SIDE || h > MAX_DECODE_SIDE {
+        return Err(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError),
+        ));
+    }
+    let pixels = u64::from(w) * u64::from(h);
+    if pixels > MAX_DECODE_PIXELS {
+        return Err(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError),
+        ));
+    }
+    Ok(())
 }
 
 fn ready_state(out: DecodeOutput) -> ImageState {
@@ -549,5 +640,39 @@ mod tests {
             cache.get(&url).map(|e| &e.state),
             Some(ImageState::Loading)
         ));
+    }
+
+    #[test]
+    fn memory_cache_evicts_when_over_capacity() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        // Force a tiny budget by filling with Failed entries (not Loading).
+        for i in 0..(MAX_MEMORY_ENTRIES + 8) {
+            let url = format!("http://example.com/{i}.png");
+            cache.insert_entry(
+                url,
+                ImageEntry {
+                    state: ImageState::Failed,
+                    kind: ImageKind::Smiley,
+                },
+            );
+        }
+        assert!(cache.entries.len() <= MAX_MEMORY_ENTRIES);
+        assert_eq!(cache.entries.len(), cache.order.len());
+    }
+
+    #[test]
+    fn decode_rejects_absurd_dimensions() {
+        // 1x1 is fine; bounds helper rejects synthetic huge metadata via check path.
+        let picker = Picker::halfblocks();
+        let img: image::DynamicImage =
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))
+                .into();
+        let mut bytes = Vec::new();
+        img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("encode");
+        assert!(decode_image(&picker, ImageKind::Smiley, &bytes).is_ok());
+        assert!(
+            check_decoded_bounds(&image::DynamicImage::new_rgba8(MAX_DECODE_SIDE + 1, 1)).is_err()
+        );
     }
 }

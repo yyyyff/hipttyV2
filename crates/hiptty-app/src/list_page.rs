@@ -21,7 +21,6 @@ impl ListPageKind {
             Self::Favorites => "我的收藏",
         }
     }
-
 }
 
 #[derive(Debug, Clone, Default)]

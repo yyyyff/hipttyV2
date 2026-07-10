@@ -384,10 +384,7 @@ fn strip_edit_notice_from_spans(
         return Some(result);
     }
     // Text-only node (classic `[本帖最后由…]` suffix with no smileys).
-    if spans
-        .iter()
-        .all(|s| matches!(s, ContentSpan::Text { .. }))
-    {
+    if spans.iter().all(|s| matches!(s, ContentSpan::Text { .. })) {
         let mut flat = String::new();
         for span in spans {
             if let ContentSpan::Text { text, .. } = span {
@@ -574,7 +571,10 @@ mod edit_notice_tests {
 
     #[test]
     fn normalize_time_strips_published_label() {
-        assert_eq!(normalize_post_time("发表于 2026-6-7 13:13"), "2026-6-7 13:13");
+        assert_eq!(
+            normalize_post_time("发表于 2026-6-7 13:13"),
+            "2026-6-7 13:13"
+        );
         assert_eq!(normalize_post_time("2026-6-7 13:13"), "2026-6-7 13:13");
     }
 
@@ -712,10 +712,7 @@ mod tests {
         for post in &detail.posts {
             for node in &post.content {
                 if let hiptty_core::ContentNode::Quote {
-                    author,
-                    time,
-                    text,
-                    ..
+                    author, time, text, ..
                 } = node
                 {
                     assert!(author.is_some(), "quote author on floor {}", post.floor);

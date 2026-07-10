@@ -27,7 +27,11 @@ pub fn forum_tab_hits(area: Rect, props: &ForumTabsProps<'_>) -> ForumTabHits {
     layout_forum_tabs(area, props).1
 }
 
-pub fn draw_forum_tabs(frame: &mut Frame<'_>, area: Rect, props: ForumTabsProps<'_>) -> ForumTabHits {
+pub fn draw_forum_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    props: ForumTabsProps<'_>,
+) -> ForumTabHits {
     if area.width == 0 || area.height == 0 {
         return ForumTabHits::default();
     }
@@ -138,13 +142,13 @@ mod tests {
             first.width as usize,
             str_width(line.spans[0].content.as_ref())
         );
-        assert_eq!(
-            first.width as usize,
-            str_width(&tab_label(2, true))
-        );
+        assert_eq!(first.width as usize, str_width(&tab_label(2, true)));
 
         let second = hits.tabs[1].expect("second tab hit");
-        assert_eq!(second.x, first.x.saturating_add(first.width) + str_width(SEP) as u16);
+        assert_eq!(
+            second.x,
+            first.x.saturating_add(first.width) + str_width(SEP) as u16
+        );
         assert_eq!(
             second.width as usize,
             str_width(line.spans[2].content.as_ref())

@@ -227,15 +227,8 @@ pub struct ConfirmProps<'a> {
 pub fn draw_confirm_dialog(frame: &mut Frame<'_>, area: Rect, props: ConfirmProps<'_>) {
     let width = area.width.min(48);
     let height = 8;
-    let modal = crate::modal::begin_modal(
-        frame,
-        area,
-        props.palette,
-        props.title,
-        width,
-        height,
-        None,
-    );
+    let modal =
+        crate::modal::begin_modal(frame, area, props.palette, props.title, width, height, None);
     let chunks = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).split(modal.body);
     frame.render_widget(
         Paragraph::new(props.message).style(props.palette.foreground_style()),

@@ -231,11 +231,13 @@ fn handle_command_bar_key(
         KeyCode::Delete => command_delete(app),
         KeyCode::Left => {
             let cur = app.overlay_state.command_cursor;
-            app.overlay_state.command_cursor = prev_char_boundary(&app.overlay_state.command_input, cur);
+            app.overlay_state.command_cursor =
+                prev_char_boundary(&app.overlay_state.command_input, cur);
         }
         KeyCode::Right => {
             let cur = app.overlay_state.command_cursor;
-            app.overlay_state.command_cursor = next_char_boundary(&app.overlay_state.command_input, cur);
+            app.overlay_state.command_cursor =
+                next_char_boundary(&app.overlay_state.command_input, cur);
         }
         KeyCode::Home => app.overlay_state.command_cursor = 0,
         KeyCode::End => app.overlay_state.command_cursor = app.overlay_state.command_input.len(),
@@ -479,6 +481,7 @@ fn open_notification_target(
                 loading_more: false,
                 pending_fetch: None,
                 error: None,
+                layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
             let _ = worker_tx.send(WorkerRequest::LoadThreadAtPost { tid, pid });
@@ -516,6 +519,7 @@ fn open_thread_from_item(
                 loading_more: false,
                 pending_fetch: None,
                 error: None,
+                layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
             let _ = worker_tx.send(WorkerRequest::LoadThreadAtPost { tid, pid });
@@ -677,6 +681,7 @@ pub fn handle_worker_extensions(
             has_pm,
             has_notifications,
         } => {
+            app.unread.check_in_flight = false;
             app.unread.has_pm = *has_pm;
             app.unread.has_notifications = *has_notifications;
             true
@@ -694,6 +699,7 @@ pub fn handle_worker_extensions(
                     }
                     app.detail.detail = Some(detail.clone());
                     app.detail.error = None;
+                    app.invalidate_detail_layout();
                     crate::event::prefetch_detail_images(app, worker_tx);
                     app.sync_detail_scroll();
                 }
@@ -740,7 +746,11 @@ fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
 }
 
-pub fn switch_feed_forum(app: &mut App, fid: u32, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+pub fn switch_feed_forum(
+    app: &mut App,
+    fid: u32,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+) {
     if app.feed.fid == fid {
         return;
     }

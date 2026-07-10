@@ -256,8 +256,7 @@ impl ComposerState {
         } else {
             self.type_id = type_id
                 .filter(|id| {
-                    !is_placeholder_type_id(id)
-                        && self.type_choices.iter().any(|c| c.id == *id)
+                    !is_placeholder_type_id(id) && self.type_choices.iter().any(|c| c.id == *id)
                 })
                 .or_else(|| {
                     self.type_choices
@@ -327,10 +326,7 @@ pub fn edit_post_action(tid: &str, pid: &str, fid: u32, page: u32) -> PostAction
 }
 
 pub fn new_thread_action(fid: u32) -> PostAction {
-    PostAction::NewThread {
-        fid,
-        type_id: None,
-    }
+    PostAction::NewThread { fid, type_id: None }
 }
 
 pub fn delete_post_action(tid: &str, pid: &str, fid: u32) -> PostAction {
@@ -413,11 +409,8 @@ mod tests {
 
     #[test]
     fn discovery_without_types_ok() {
-        let mut c = ComposerState::preparing(
-            ComposerKind::NewThread,
-            new_thread_action(2),
-            "新帖".into(),
-        );
+        let mut c =
+            ComposerState::preparing(ComposerKind::NewThread, new_thread_action(2), "新帖".into());
         c.apply_type_choices(None, BTreeMap::new());
         assert!(!c.need_type_ui());
         assert!(!c.require_type());

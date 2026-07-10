@@ -43,7 +43,11 @@ pub fn forum_picker_entries(current_fid: u32, default_forums: &[u32; 3]) -> Vec<
     forum_picker_fids(current_fid, default_forums)
 }
 
-pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerProps<'_>) -> ForumPickerFrame {
+pub fn draw_forum_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    props: ForumPickerProps<'_>,
+) -> ForumPickerFrame {
     let popup_width = area.width.min(POPUP_WIDTH);
     let popup_height = area.height.min(POPUP_HEIGHT);
     let modal = begin_modal(
@@ -66,23 +70,14 @@ pub fn draw_forum_picker(frame: &mut Frame<'_>, area: Rect, props: ForumPickerPr
         props.selected,
     );
     let scroll = ensure_line_scroll(
-        model
-            .entry_lines
-            .get(props.selected)
-            .copied()
-            .unwrap_or(0),
+        model.entry_lines.get(props.selected).copied().unwrap_or(0),
         props.scroll_offset,
         viewport,
     );
 
     let hits = picker_hits_for_viewport(&model.entry_lines, list_area, scroll, viewport);
 
-    let visible: Vec<ListItem> = model
-        .rows
-        .into_iter()
-        .skip(scroll)
-        .take(viewport)
-        .collect();
+    let visible: Vec<ListItem> = model.rows.into_iter().skip(scroll).take(viewport).collect();
     frame.render_widget(List::new(visible), list_area);
 
     ForumPickerFrame {
@@ -124,8 +119,7 @@ fn build_forum_picker_model(
     selected: usize,
 ) -> ForumPickerModel {
     let subforums = forum_children(current_fid);
-    let mut excluded: std::collections::HashSet<u32> =
-        default_forums.iter().copied().collect();
+    let mut excluded: std::collections::HashSet<u32> = default_forums.iter().copied().collect();
     excluded.extend(subforums.iter().copied());
 
     let all_forums: Vec<u32> = FORUMS
@@ -147,12 +141,7 @@ fn build_forum_picker_model(
         for &fid in subforums {
             entry_lines.push(line);
             let row_selected = entry_idx == selected;
-            rows.push(forum_row(
-                palette,
-                fid,
-                marker_fid,
-                row_selected,
-            ));
+            rows.push(forum_row(palette, fid, marker_fid, row_selected));
             line += 1;
             entry_idx += 1;
         }
@@ -168,12 +157,7 @@ fn build_forum_picker_model(
         for fid in all_forums {
             entry_lines.push(line);
             let row_selected = entry_idx == selected;
-            rows.push(forum_row(
-                palette,
-                fid,
-                marker_fid,
-                row_selected,
-            ));
+            rows.push(forum_row(palette, fid, marker_fid, row_selected));
             line += 1;
             entry_idx += 1;
         }
@@ -196,12 +180,7 @@ fn section_rule(palette: Palette) -> ListItem<'static> {
     )))
 }
 
-fn forum_row(
-    palette: Palette,
-    fid: u32,
-    marker_fid: u32,
-    selected: bool,
-) -> ListItem<'static> {
+fn forum_row(palette: Palette, fid: u32, marker_fid: u32, selected: bool) -> ListItem<'static> {
     let name = forum_name(fid).unwrap_or("?");
     let label = if fid == marker_fid {
         format!("● {name}")
@@ -238,7 +217,10 @@ mod tests {
     #[test]
     fn discovery_picker_lists_subforums_first() {
         let model = build_forum_picker_model(2, &[2, 6, 7], Palette::default(), 2, 0);
-        assert_eq!(model.entry_lines.len(), forum_picker_fids(2, &[2, 6, 7]).len());
+        assert_eq!(
+            model.entry_lines.len(),
+            forum_picker_fids(2, &[2, 6, 7]).len()
+        );
         assert_eq!(forum_children(2).len(), 2);
     }
 

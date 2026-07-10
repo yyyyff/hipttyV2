@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use hiptty_adapter::ForumClient;
 use hiptty_core::SearchQuery;
 use hiptty_core::{
@@ -67,6 +69,8 @@ pub enum WorkerRequest {
     },
     CheckUnread,
     LoadBlacklist,
+    /// Clear in-memory cookies and persist empty session (local logout).
+    Logout,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +145,9 @@ pub enum WorkerResponse {
     BlacklistLoaded {
         result: AdapterResult<Vec<String>>,
     },
+    LoggedOut {
+        result: AdapterResult<()>,
+    },
 }
 
 pub fn spawn_worker<C: ForumClient + 'static>(
@@ -148,9 +155,22 @@ pub fn spawn_worker<C: ForumClient + 'static>(
     mut rx: mpsc::UnboundedReceiver<WorkerRequest>,
     tx: mpsc::UnboundedSender<WorkerResponse>,
 ) {
+    // Shared so image fetches can run concurrently without blocking page load / post.
+    let client = Arc::new(client);
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             match req {
+                // App caps in-flight at IMAGE_FETCH_CONCURRENCY; worker must actually
+                // parallelize or the cap is only a queue depth, not HTTP concurrency.
+                WorkerRequest::FetchImage { url, kind } => {
+                    let client = Arc::clone(&client);
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let result = client.fetch_url(&url).await;
+                        let _ = tx.send(WorkerResponse::ImageFetched { url, kind, result });
+                    });
+                    continue;
+                }
                 WorkerRequest::CheckSession => {
                     let result = client.session_status().await;
                     let info = result.unwrap_or(SessionInfo {
@@ -204,10 +224,6 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                 WorkerRequest::LoadThreadDetail { tid, page } => {
                     let result = client.thread_detail(&tid, page).await;
                     let _ = tx.send(WorkerResponse::ThreadDetailLoaded { tid, page, result });
-                }
-                WorkerRequest::FetchImage { url, kind } => {
-                    let result = client.fetch_url(&url).await;
-                    let _ = tx.send(WorkerResponse::ImageFetched { url, kind, result });
                 }
                 WorkerRequest::PreparePost { action } => {
                     let result = client.prepare_post(action.clone()).await;
@@ -274,10 +290,11 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                     let _ = tx.send(WorkerResponse::ThreadAtPostLoaded { tid, result });
                 }
                 WorkerRequest::CheckUnread => {
-                    let has_pm = client.check_new_pm().await.unwrap_or(false);
-                    let has_notifications = client
-                        .notifications()
-                        .await
+                    // Run both checks concurrently so offline timeout is one RTT, not two.
+                    let (pm_result, notif_result) =
+                        tokio::join!(client.check_new_pm(), client.notifications());
+                    let has_pm = pm_result.unwrap_or(false);
+                    let has_notifications = notif_result
                         .map(|list| list.items.iter().any(|i| i.is_new))
                         .unwrap_or(false);
                     let _ = tx.send(WorkerResponse::UnreadChecked {
@@ -288,6 +305,10 @@ pub fn spawn_worker<C: ForumClient + 'static>(
                 WorkerRequest::LoadBlacklist => {
                     let result = client.blacklist().await;
                     let _ = tx.send(WorkerResponse::BlacklistLoaded { result });
+                }
+                WorkerRequest::Logout => {
+                    let result = client.logout().await;
+                    let _ = tx.send(WorkerResponse::LoggedOut { result });
                 }
                 WorkerRequest::UploadComposerImage { action, path } => {
                     let result = async {

@@ -25,7 +25,7 @@ pub fn draw_graphic_in_viewport(
     fail_label: &str,
     doc_x: u16,
     doc_y: i32,
-    scroll_top: u16,
+    scroll_top: u32,
 ) {
     if viewport.width == 0 || viewport.height == 0 {
         return;
@@ -151,7 +151,7 @@ fn draw_fail_label(
     label: &str,
     doc_x: u16,
     doc_y: i32,
-    scroll_top: u16,
+    scroll_top: u32,
     palette: hiptty_render::Palette,
 ) {
     let row = doc_y - scroll_top as i32;
@@ -175,7 +175,7 @@ fn draw_loading_label(
     viewport: Rect,
     doc_x: u16,
     doc_y: i32,
-    scroll_top: u16,
+    scroll_top: u32,
     palette: hiptty_render::Palette,
 ) {
     let row = doc_y - scroll_top as i32;

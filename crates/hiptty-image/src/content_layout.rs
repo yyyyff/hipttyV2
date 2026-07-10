@@ -93,17 +93,8 @@ fn layout_content_node(
     match node {
         ContentNode::Text { spans } => layout_text_spans(spans, max_cols, palette, cache),
         ContentNode::Quote {
-            author,
-            time,
-            text,
-            ..
-        } => layout_quote(
-            author.as_deref(),
-            time.as_deref(),
-            text,
-            max_cols,
-            palette,
-        ),
+            author, time, text, ..
+        } => layout_quote(author.as_deref(), time.as_deref(), text, max_cols, palette),
         ContentNode::Image { url, thumb_url, .. } => {
             let image_url = thumb_url.as_deref().unwrap_or(url.as_str()).to_string();
             vec![image_block(
@@ -221,9 +212,12 @@ fn pack_atoms(atoms: Vec<LayoutAtom>, max_cols: usize) -> Vec<ContentBlock> {
         } else {
             Style::default()
         };
-        rows.last_mut().unwrap().push(InlinePart::Text(Line::from(
-            Span::styled(std::mem::take(text_run), style),
-        )));
+        rows.last_mut()
+            .unwrap()
+            .push(InlinePart::Text(Line::from(Span::styled(
+                std::mem::take(text_run),
+                style,
+            ))));
         *has_style = false;
     };
 
@@ -285,9 +279,7 @@ fn pack_atoms(atoms: Vec<LayoutAtom>, max_cols: usize) -> Vec<ContentBlock> {
             blocks.push(ContentBlock::Text(Line::from("")));
             continue;
         }
-        let has_smiley = parts
-            .iter()
-            .any(|p| matches!(p, InlinePart::Smiley { .. }));
+        let has_smiley = parts.iter().any(|p| matches!(p, InlinePart::Smiley { .. }));
         if !has_smiley {
             // Merge pure-text parts into one Line.
             let mut spans = Vec::new();
@@ -439,8 +431,8 @@ fn image_fail_height(kind: ImageKind) -> u16 {
 fn core_style_to_ratatui(style: &hiptty_core::Style, palette: Palette) -> Style {
     let mut out = palette.foreground_style();
     if let Some(fg) = style.fg.as_deref() {
-        if let Some(color) = hiptty_render::parse_hex_color(fg)
-            .or_else(|| parse_named_color(fg, palette))
+        if let Some(color) =
+            hiptty_render::parse_hex_color(fg).or_else(|| parse_named_color(fg, palette))
         {
             out = out.fg(color);
         }
@@ -544,7 +536,9 @@ mod tests {
             edited_at: None,
         };
         let blocks = layout_post_blocks(&post, 40, palette, &cache);
-        let inline = blocks.iter().find(|b| matches!(b, ContentBlock::Inline { .. }));
+        let inline = blocks
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Inline { .. }));
         assert!(
             inline.is_some(),
             "expected a single Inline row, got {blocks:?}"
@@ -557,7 +551,10 @@ mod tests {
             assert_eq!(
                 blocks
                     .iter()
-                    .filter(|b| matches!(b, ContentBlock::Inline { .. } | ContentBlock::Smiley { .. }))
+                    .filter(|b| matches!(
+                        b,
+                        ContentBlock::Inline { .. } | ContentBlock::Smiley { .. }
+                    ))
                     .count(),
                 1,
                 "smiley should not force its own full-width row"

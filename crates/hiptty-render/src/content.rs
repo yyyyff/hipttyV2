@@ -42,10 +42,7 @@ pub fn render_content_node(
     match node {
         ContentNode::Text { spans } => render_text_spans(spans, max_cols, palette),
         ContentNode::Quote {
-            author,
-            time,
-            text,
-            ..
+            author, time, text, ..
         } => render_quote(author.as_deref(), time.as_deref(), text, max_cols, palette),
         ContentNode::Image { .. } => vec![Line::styled(IMAGE_PLACEHOLDER, palette.muted_style())],
         ContentNode::Attachment { name, size, .. } => {
@@ -132,7 +129,10 @@ fn render_quote(
 
 /// Quote chrome label: `@author in time`, `@author`, or `@?`.
 pub fn quote_header_label(author: Option<&str>, time: Option<&str>) -> String {
-    match (author.map(str::trim).filter(|s| !s.is_empty()), time.map(str::trim).filter(|s| !s.is_empty())) {
+    match (
+        author.map(str::trim).filter(|s| !s.is_empty()),
+        time.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
         (Some(a), Some(t)) => format!("@{a} in {t}"),
         (Some(a), None) => format!("@{a}"),
         (None, Some(t)) => format!("@? in {t}"),
@@ -323,7 +323,8 @@ mod tests {
 
     #[test]
     fn floor_meta_no_double_published_prefix() {
-        let (_r1, r2) = floor_header_rows("bob", 1, "发表于 2026-6-7 13:13", 40, Palette::default());
+        let (_r1, r2) =
+            floor_header_rows("bob", 1, "发表于 2026-6-7 13:13", 40, Palette::default());
         let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.matches("发表于").count(), 1, "got {text}");
         assert!(text.contains("2026-6-7 13:13"), "forum time kept: {text}");
@@ -343,8 +344,7 @@ mod tests {
         );
         let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
-            text,
-            "发表于 2026-6-7 13:13 · 编辑于 2026-6-16 21:24",
+            text, "发表于 2026-6-7 13:13 · 编辑于 2026-6-16 21:24",
             "got {text}"
         );
     }
@@ -362,8 +362,7 @@ mod tests {
         );
         let text: String = r2.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
-            text,
-            "发表于 2026-6-7 13:13 · 由mod编辑于 2026-6-16 21:24",
+            text, "发表于 2026-6-7 13:13 · 由mod编辑于 2026-6-16 21:24",
             "got {text}"
         );
     }

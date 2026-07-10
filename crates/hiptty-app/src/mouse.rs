@@ -2,9 +2,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use hiptty_widgets::{
-    apply_scroll_delta, clamp_scroll_top, clamp_thread_scroll_lines, floor_index_at_line,
-    item_index_at_row, list_content_lines, max_scroll_lines, ScrollBar, ScrollBarArrows,
-    ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT, WHEEL_LINES,
+    apply_scroll_delta_u32, clamp_thread_scroll_lines, item_index_at_row, list_content_lines,
+    max_scroll_lines, ScrollBar, ScrollBarArrows, ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
+    WHEEL_LINES,
 };
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -165,8 +165,7 @@ fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
             return Some(TitleAction::PmList);
         }
     }
-    if app.page == Page::ThreadFeed
-        && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+    if app.page == Page::ThreadFeed && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
     {
         if let Some(index) = app.forum_tab_hover {
             return Some(TitleAction::ForumTab(index));
@@ -199,22 +198,22 @@ fn apply_title_action(
     }
 }
 
-fn current_scroll_offset(app: &App) -> u16 {
+fn current_scroll_offset(app: &App) -> u32 {
     match app.page {
-        Page::ThreadFeed => app.feed.scroll_lines,
+        Page::ThreadFeed => u32::from(app.feed.scroll_lines),
         Page::ThreadDetail => app.detail.scroll_top,
         Page::PmList
         | Page::Notifications
         | Page::Search
         | Page::MyThreads
         | Page::MyReplies
-        | Page::Favorites => app.list_page.scroll_lines,
-        Page::PmThread => app.pm_thread.scroll_lines,
+        | Page::Favorites => u32::from(app.list_page.scroll_lines),
+        Page::PmThread => u32::from(app.pm_thread.scroll_lines),
         _ => 0,
     }
 }
 
-fn scrollbar_action(app: &mut App, event: MouseEvent, current_offset: u16) -> Option<u16> {
+fn scrollbar_action(app: &mut App, event: MouseEvent, current_offset: u32) -> Option<u32> {
     let chrome = app.scroll_chrome?;
 
     match event.kind {
@@ -248,8 +247,8 @@ fn scrollbar_action(app: &mut App, event: MouseEvent, current_offset: u16) -> Op
 fn wheel_over_content(
     event: MouseEvent,
     chrome: hiptty_widgets::ScrollChrome,
-    current_offset: u16,
-) -> Option<u16> {
+    current_offset: u32,
+) -> Option<u32> {
     let delta = match event.kind {
         MouseEventKind::ScrollUp => -WHEEL_LINES,
         MouseEventKind::ScrollDown => WHEEL_LINES,
@@ -258,7 +257,7 @@ fn wheel_over_content(
     if !point_in(event.column, event.row, chrome.content) {
         return None;
     }
-    Some(apply_scroll_delta(
+    Some(apply_scroll_delta_u32(
         current_offset,
         delta,
         chrome.max_offset(),
@@ -267,24 +266,24 @@ fn wheel_over_content(
 
 fn apply_scroll_offset(
     app: &mut App,
-    offset: u16,
+    offset: u32,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
     match app.page {
         Page::ThreadFeed => {
             let max = list_max_offset(app);
-            app.feed.scroll_lines = clamp_thread_scroll_lines(offset, max);
+            let offset_u16 = offset.min(u32::from(u16::MAX)) as u16;
+            app.feed.scroll_lines = clamp_thread_scroll_lines(offset_u16, max);
         }
         Page::ThreadDetail => {
-            if let Some(detail) = app.detail.detail.as_ref() {
-                let width = app.content_width();
+            if app.detail.detail.is_some() {
                 let viewport = app.scroll_viewport_height();
-                let palette = app.palette();
-                let posts = detail.posts.as_slice();
-                app.detail.scroll_top = {
-                    let images = app.images();
-                    clamp_scroll_top(offset, posts, width, viewport, palette, images)
-                };
+                if let Some(scroll) = app
+                    .detail_layout()
+                    .map(|layout| layout.clamp_scroll_top(offset, viewport))
+                {
+                    app.detail.scroll_top = scroll;
+                }
                 maybe_load_more_detail(app, worker_tx);
                 prefetch_detail_viewport_images(app, worker_tx);
             }
@@ -300,7 +299,8 @@ fn apply_scroll_offset(
                 list_content_lines(app.list_page.items.len(), item_h),
                 app.scroll_viewport_height(),
             );
-            app.list_page.scroll_lines = clamp_thread_scroll_lines(offset, max);
+            let offset_u16 = offset.min(u32::from(u16::MAX)) as u16;
+            app.list_page.scroll_lines = clamp_thread_scroll_lines(offset_u16, max);
             if let Some(kind) = app.list_page.kind {
                 maybe_load_more_list(app, worker_tx, kind);
             }
@@ -310,7 +310,8 @@ fn apply_scroll_offset(
                 list_content_lines(app.pm_thread.messages.len(), PM_ITEM_HEIGHT),
                 app.scroll_viewport_height(),
             );
-            app.pm_thread.scroll_lines = clamp_thread_scroll_lines(offset, max);
+            let offset_u16 = offset.min(u32::from(u16::MAX)) as u16;
+            app.pm_thread.scroll_lines = clamp_thread_scroll_lines(offset_u16, max);
         }
         _ => {}
     }
@@ -342,17 +343,21 @@ fn update_detail_selection_from_pointer(app: &mut App, row: u16, column: u16) {
     let Some(rel_y) = content_relative_y(app, row, column) else {
         return;
     };
-    let Some(detail) = app.detail.detail.as_ref() else {
+    let post_count = app
+        .detail
+        .detail
+        .as_ref()
+        .map(|d| d.posts.len())
+        .unwrap_or(0);
+    if post_count == 0 {
         return;
-    };
-    let line = app.detail.scroll_top.saturating_add(rel_y);
-    let width = app.content_width();
-    let palette = app.palette();
-    let idx = {
-        let images = app.images();
-        floor_index_at_line(line, &detail.posts, width, palette, images)
-    };
-    if idx >= detail.posts.len() || idx == app.detail.selected {
+    }
+    let line = app.detail.scroll_top.saturating_add(u32::from(rel_y));
+    let idx = app
+        .detail_layout()
+        .map(|l| l.floor_index_at_line(line))
+        .unwrap_or(0);
+    if idx >= post_count || idx == app.detail.selected {
         return;
     }
     app.detail.selected = idx;
@@ -530,12 +535,12 @@ fn point_in(column: u16, row: u16, area: Rect) -> bool {
 pub fn install_scroll_chrome(
     app: &mut App,
     full_content: Rect,
-    content_len: u16,
-    offset: u16,
+    content_len: u32,
+    offset: u32,
 ) -> Rect {
     let (content, bar) = hiptty_widgets::split_content_scrollbar(full_content);
     let viewport = content.height;
-    let shown = content_len > viewport && bar.width > 0;
+    let shown = content_len > u32::from(viewport) && bar.width > 0;
     app.scroll_chrome = Some(hiptty_widgets::ScrollChrome {
         content,
         bar,

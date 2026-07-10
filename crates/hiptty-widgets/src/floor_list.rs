@@ -24,27 +24,348 @@ const HEADER_H: u16 = 2;
 const GAP_H: u16 = 1;
 const SEPARATOR_H: u16 = 1;
 
+/// Absolute document row (scroll offset / floor top). Wider than terminal `u16`.
+pub type DocY = u32;
+
 pub struct FloorListProps<'a> {
     pub palette: Palette,
     pub posts: &'a [Post],
     pub selected: usize,
-    pub scroll_top: u16,
+    pub scroll_top: DocY,
     pub show_avatar: bool,
     pub images: Option<&'a mut ImageCache>,
     pub mask_cjk: bool,
+    /// When set (and `layout.width` matches the draw area), walk uses cached heights
+    /// instead of re-wrapping every floor each frame.
+    pub layout: Option<&'a FloorLayout>,
 }
 
-fn content_height(post: &Post, body_w: u16, palette: Palette, images: Option<&ImageCache>) -> u16 {
+/// Precomputed per-floor heights and document offsets for the detail list.
+///
+/// Built in a **single** pass over posts. Scroll / hit-test helpers should reuse this
+/// rather than calling [`measure_floor`] repeatedly (which re-wraps content each time).
+#[derive(Debug, Clone)]
+pub struct FloorLayout {
+    pub width: u16,
+    pub heights: Vec<DocY>,
+    pub offsets: Vec<DocY>,
+    pub total: DocY,
+}
+
+impl FloorLayout {
+    pub fn build(
+        posts: &[Post],
+        width: u16,
+        palette: Palette,
+        images: Option<&ImageCache>,
+    ) -> Self {
+        let mut heights = Vec::with_capacity(posts.len());
+        let mut offsets = Vec::with_capacity(posts.len());
+        let mut top = 0u32;
+        for (idx, post) in posts.iter().enumerate() {
+            offsets.push(top);
+            let h = measure_floor(post, width, palette, images, idx + 1 < posts.len());
+            heights.push(h);
+            top = top.saturating_add(h);
+        }
+        Self {
+            width,
+            heights,
+            offsets,
+            total: top,
+        }
+    }
+
+    pub fn floor_count(&self) -> usize {
+        self.heights.len()
+    }
+
+    pub fn matches(&self, width: u16, post_count: usize) -> bool {
+        self.width == width && self.heights.len() == post_count
+    }
+
+    pub fn height(&self, idx: usize) -> DocY {
+        self.heights.get(idx).copied().unwrap_or(0)
+    }
+
+    pub fn offset(&self, idx: usize) -> DocY {
+        self.offsets.get(idx).copied().unwrap_or(0)
+    }
+
+    pub fn first_visible(&self, scroll_top: DocY) -> usize {
+        if self.heights.is_empty() {
+            return 0;
+        }
+        for (idx, &top) in self.offsets.iter().enumerate() {
+            let bottom = top.saturating_add(self.heights[idx]);
+            if bottom > scroll_top {
+                return idx;
+            }
+        }
+        self.heights.len().saturating_sub(1)
+    }
+
+    pub fn last_visible(&self, scroll_top: DocY, viewport_h: u16) -> usize {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        let viewport_bottom = scroll_top.saturating_add(u32::from(viewport_h));
+        let mut last = self.first_visible(scroll_top);
+        for (idx, &top) in self.offsets.iter().enumerate() {
+            if top >= viewport_bottom {
+                break;
+            }
+            let bottom = top.saturating_add(self.heights[idx]);
+            if bottom > scroll_top {
+                last = idx;
+            }
+        }
+        last
+    }
+
+    pub fn floor_index_at_line(&self, line: DocY) -> usize {
+        if self.offsets.is_empty() {
+            return 0;
+        }
+        for (idx, &top) in self.offsets.iter().enumerate().rev() {
+            if line >= top {
+                return idx;
+            }
+        }
+        0
+    }
+
+    pub fn floors_per_page(&self, first_floor: usize, viewport_h: u16) -> usize {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        let mut used = 0u32;
+        let mut count = 0usize;
+        for &h in self.heights.iter().skip(first_floor) {
+            if count > 0 && used.saturating_add(h) > u32::from(viewport_h) {
+                break;
+            }
+            used = used.saturating_add(h);
+            count += 1;
+        }
+        count.max(1)
+    }
+
+    pub fn ensure_scroll_top(&self, selected: usize, scroll_top: DocY, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        let selected = selected.min(self.heights.len() - 1);
+        let sel_top = self.offsets[selected];
+        let floor_h = self.heights[selected];
+        let sel_bottom = sel_top.saturating_add(floor_h);
+
+        if sel_top < scroll_top {
+            return sel_top;
+        }
+        if sel_bottom <= scroll_top.saturating_add(u32::from(viewport_h)) {
+            return scroll_top;
+        }
+        if floor_h > u32::from(viewport_h) {
+            let max_top = sel_bottom.saturating_sub(u32::from(viewport_h));
+            return scroll_top.max(sel_top).min(max_top);
+        }
+        sel_bottom.saturating_sub(u32::from(viewport_h))
+    }
+
+    pub fn clamp_scroll_top(&self, scroll_top: DocY, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        scroll_top.min(self.total.saturating_sub(u32::from(viewport_h)))
+    }
+
+    pub fn capture_scroll_anchor(&self, scroll_top: DocY) -> DetailScrollAnchor {
+        if self.heights.is_empty() {
+            return DetailScrollAnchor {
+                floor: 0,
+                offset_in_floor: 0,
+            };
+        }
+        let floor = self.first_visible(scroll_top);
+        let floor_top = self.offset(floor);
+        DetailScrollAnchor {
+            floor,
+            offset_in_floor: scroll_top.saturating_sub(floor_top),
+        }
+    }
+
+    pub fn restore_scroll_anchor(&self, anchor: DetailScrollAnchor, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() {
+            return 0;
+        }
+        let floor = anchor.floor.min(self.heights.len().saturating_sub(1));
+        let floor_top = self.offset(floor);
+        let floor_h = self.height(floor);
+        let max_intra = floor_h.saturating_sub(1);
+        let target = floor_top.saturating_add(anchor.offset_in_floor.min(max_intra));
+        self.clamp_scroll_top(target, viewport_h)
+    }
+
+    pub fn detail_line_scroll(&self, scroll_top: DocY, delta_lines: i32, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() || viewport_h == 0 || delta_lines == 0 {
+            return scroll_top;
+        }
+        let max_scroll = self.total.saturating_sub(u32::from(viewport_h));
+
+        if delta_lines > 0 {
+            let step = delta_lines.unsigned_abs();
+            if scroll_top >= max_scroll {
+                return max_scroll;
+            }
+            let first = self.first_visible(scroll_top);
+            let floor_h = self.height(first);
+            if floor_h <= u32::from(viewport_h) {
+                return scroll_top.saturating_add(step).min(max_scroll);
+            }
+            let floor_top = self.offset(first);
+            let floor_end = floor_read_end_scroll(floor_top, floor_h, viewport_h);
+            if scroll_top >= floor_end {
+                if first + 1 < self.heights.len() {
+                    return self.offset(first + 1);
+                }
+                return max_scroll;
+            }
+            let candidate = scroll_top.saturating_add(step);
+            if candidate > floor_end {
+                if first + 1 < self.heights.len() {
+                    return self.offset(first + 1);
+                }
+                return floor_end.min(max_scroll);
+            }
+            candidate.min(max_scroll)
+        } else {
+            let step = delta_lines.unsigned_abs();
+            if scroll_top == 0 {
+                return 0;
+            }
+            let first = self.first_visible(scroll_top);
+            let floor_h = self.height(first);
+            let floor_top = self.offset(first);
+            if floor_h <= u32::from(viewport_h) {
+                if scroll_top <= floor_top {
+                    return self.scroll_to_previous_floor(first, viewport_h);
+                }
+                let candidate = scroll_top.saturating_sub(step);
+                if candidate < floor_top {
+                    return self.scroll_to_previous_floor(first, viewport_h);
+                }
+                return candidate;
+            }
+            if scroll_top <= floor_top {
+                return self.scroll_to_previous_floor(first, viewport_h);
+            }
+            let candidate = scroll_top.saturating_sub(step);
+            if candidate < floor_top {
+                return self.scroll_to_previous_floor(first, viewport_h);
+            }
+            candidate
+        }
+    }
+
+    pub fn detail_step_down(
+        &self,
+        selected: usize,
+        scroll_top: DocY,
+        viewport_h: u16,
+    ) -> (usize, DocY) {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return (0, 0);
+        }
+        let selected = selected.min(self.heights.len() - 1);
+        let max_scroll = self.total.saturating_sub(u32::from(viewport_h));
+        if scroll_top >= max_scroll {
+            return (selected, max_scroll);
+        }
+        let first = self.first_visible(scroll_top);
+        let floor_h = self.height(first);
+        let new_scroll = if floor_h > u32::from(viewport_h) {
+            self.detail_line_scroll(scroll_top, i32::from(DETAIL_STEP_LINES), viewport_h)
+        } else if first + 1 < self.heights.len() {
+            self.offset(first + 1)
+        } else {
+            max_scroll
+        };
+        (self.first_visible(new_scroll), new_scroll)
+    }
+
+    pub fn detail_step_up(
+        &self,
+        selected: usize,
+        scroll_top: DocY,
+        viewport_h: u16,
+    ) -> (usize, DocY) {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return (0, 0);
+        }
+        let _ = selected.min(self.heights.len() - 1);
+        if scroll_top == 0 {
+            return (0, 0);
+        }
+        let first = self.first_visible(scroll_top);
+        let floor_h = self.height(first);
+        let new_scroll = if floor_h > u32::from(viewport_h) {
+            self.detail_line_scroll(scroll_top, -i32::from(DETAIL_STEP_LINES), viewport_h)
+        } else {
+            let floor_top = self.offset(first);
+            if scroll_top > floor_top {
+                floor_top
+            } else if first > 0 {
+                self.offset(first - 1)
+            } else {
+                0
+            }
+        };
+        (self.first_visible(new_scroll), new_scroll)
+    }
+
+    pub fn page_scroll_top(&self, scroll_top: DocY, delta: i32, viewport_h: u16) -> DocY {
+        if self.heights.is_empty() || viewport_h == 0 {
+            return 0;
+        }
+        let first = self.first_visible(scroll_top);
+        let page_size = self.floors_per_page(first, viewport_h);
+        let target_floor = if delta > 0 {
+            (first + page_size).min(self.heights.len().saturating_sub(1))
+        } else {
+            first.saturating_sub(page_size)
+        };
+        self.offset(target_floor)
+    }
+
+    fn scroll_to_previous_floor(&self, first: usize, viewport_h: u16) -> DocY {
+        if first == 0 {
+            return 0;
+        }
+        let prev = first - 1;
+        let prev_top = self.offset(prev);
+        let prev_h = self.height(prev);
+        if prev_h > u32::from(viewport_h) {
+            floor_read_end_scroll(prev_top, prev_h, viewport_h)
+        } else {
+            prev_top
+        }
+    }
+}
+
+fn content_height(post: &Post, body_w: u16, palette: Palette, images: Option<&ImageCache>) -> DocY {
     if let Some(cache) = images {
-        layout_post_blocks(post, body_w, palette, cache)
-            .iter()
-            .map(ContentBlock::height)
-            .sum::<u16>()
-            .max(1)
+        u32::from(
+            layout_post_blocks(post, body_w, palette, cache)
+                .iter()
+                .map(ContentBlock::height)
+                .sum::<u16>()
+                .max(1),
+        )
     } else {
-        render_post_content_lines(post, body_w, palette)
+        (render_post_content_lines(post, body_w, palette)
             .len()
-            .max(1) as u16
+            .max(1)) as DocY
     }
 }
 
@@ -54,7 +375,7 @@ pub fn measure_floor(
     palette: Palette,
     images: Option<&ImageCache>,
     include_separator: bool,
-) -> u16 {
+) -> DocY {
     if width < 8 {
         return 0;
     }
@@ -65,8 +386,8 @@ pub fn measure_floor(
         .map(|p| poll_block_height(p, body_w))
         .unwrap_or(0);
     let content_h = content_height(post, body_w, palette, images);
-    let sep = u16::from(include_separator) * SEPARATOR_H;
-    HEADER_H + GAP_H + poll_h + content_h + sep
+    let sep = u32::from(u16::from(include_separator) * SEPARATOR_H);
+    u32::from(HEADER_H) + u32::from(GAP_H) + u32::from(poll_h) + content_h + sep
 }
 
 pub fn floor_list_total_height(
@@ -74,12 +395,8 @@ pub fn floor_list_total_height(
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    posts
-        .iter()
-        .enumerate()
-        .map(|(idx, p)| measure_floor(p, width, palette, images, idx + 1 < posts.len()))
-        .sum()
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images).total
 }
 
 pub fn floor_offsets(
@@ -87,43 +404,18 @@ pub fn floor_offsets(
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> Vec<u16> {
-    let mut offsets = Vec::with_capacity(posts.len());
-    let mut top = 0u16;
-    for (idx, post) in posts.iter().enumerate() {
-        offsets.push(top);
-        top = top.saturating_add(measure_floor(
-            post,
-            width,
-            palette,
-            images,
-            idx + 1 < posts.len(),
-        ));
-    }
-    offsets
+) -> Vec<DocY> {
+    FloorLayout::build(posts, width, palette, images).offsets
 }
 
 pub fn first_visible_floor(
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    let offsets = floor_offsets(posts, width, palette, images);
-    for (idx, &top) in offsets.iter().enumerate() {
-        let bottom = top.saturating_add(measure_floor(
-            &posts[idx],
-            width,
-            palette,
-            images,
-            idx + 1 < posts.len(),
-        ));
-        if bottom > scroll_top {
-            return idx;
-        }
-    }
-    posts.len().saturating_sub(1)
+    FloorLayout::build(posts, width, palette, images).first_visible(scroll_top)
 }
 
 /// Anchor for keeping the viewport stable across layout reflows (image decode, append).
@@ -133,29 +425,17 @@ pub fn first_visible_floor(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DetailScrollAnchor {
     pub floor: usize,
-    pub offset_in_floor: u16,
+    pub offset_in_floor: DocY,
 }
 
 pub fn capture_detail_scroll_anchor(
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> DetailScrollAnchor {
-    if posts.is_empty() {
-        return DetailScrollAnchor {
-            floor: 0,
-            offset_in_floor: 0,
-        };
-    }
-    let floor = first_visible_floor(scroll_top, posts, width, palette, images);
-    let offsets = floor_offsets(posts, width, palette, images);
-    let floor_top = offsets.get(floor).copied().unwrap_or(0);
-    DetailScrollAnchor {
-        floor,
-        offset_in_floor: scroll_top.saturating_sub(floor_top),
-    }
+    FloorLayout::build(posts, width, palette, images).capture_scroll_anchor(scroll_top)
 }
 
 /// Restore [`DetailScrollAnchor`] after heights changed (e.g. images became Ready).
@@ -166,77 +446,31 @@ pub fn restore_detail_scroll_anchor(
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    if posts.is_empty() {
-        return 0;
-    }
-    let floor = anchor.floor.min(posts.len().saturating_sub(1));
-    let offsets = floor_offsets(posts, width, palette, images);
-    let floor_top = offsets.get(floor).copied().unwrap_or(0);
-    let floor_h = measure_floor(
-        &posts[floor],
-        width,
-        palette,
-        images,
-        floor + 1 < posts.len(),
-    );
-    // Keep the same offset into the floor, clamped so we never past the floor end alone.
-    let max_intra = floor_h.saturating_sub(1);
-    let target = floor_top.saturating_add(anchor.offset_in_floor.min(max_intra));
-    clamp_scroll_top(target, posts, width, viewport_h, palette, images)
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images).restore_scroll_anchor(anchor, viewport_h)
 }
 
 /// Floor index containing document line `line` (0-based from the list top).
 pub fn floor_index_at_line(
-    line: u16,
+    line: DocY,
     posts: &[Post],
     width: u16,
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    if posts.is_empty() {
-        return 0;
-    }
-    let offsets = floor_offsets(posts, width, palette, images);
-    for (idx, &top) in offsets.iter().enumerate().rev() {
-        if line >= top {
-            return idx;
-        }
-    }
-    0
+    FloorLayout::build(posts, width, palette, images).floor_index_at_line(line)
 }
 
 /// Last floor with any row inside the viewport `[scroll_top, scroll_top + viewport_h)`.
 pub fn last_visible_floor(
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    if posts.is_empty() || viewport_h == 0 {
-        return 0;
-    }
-    let viewport_bottom = scroll_top.saturating_add(viewport_h);
-    let mut last = first_visible_floor(scroll_top, posts, width, palette, images);
-    let offsets = floor_offsets(posts, width, palette, images);
-    for (idx, &top) in offsets.iter().enumerate() {
-        if top >= viewport_bottom {
-            break;
-        }
-        let bottom = top.saturating_add(measure_floor(
-            &posts[idx],
-            width,
-            palette,
-            images,
-            idx + 1 < posts.len(),
-        ));
-        if bottom > scroll_top {
-            last = idx;
-        }
-    }
-    last
+    FloorLayout::build(posts, width, palette, images).last_visible(scroll_top, viewport_h)
 }
 
 /// How many floors fit in one viewport page starting at `first_floor`.
@@ -248,319 +482,99 @@ pub fn floors_per_page(
     palette: Palette,
     images: Option<&ImageCache>,
 ) -> usize {
-    if posts.is_empty() || viewport_h == 0 {
-        return 0;
-    }
-    let mut used = 0u16;
-    let mut count = 0usize;
-    for (idx, post) in posts.iter().enumerate().skip(first_floor) {
-        let h = measure_floor(post, width, palette, images, idx + 1 < posts.len());
-        if count > 0 && used.saturating_add(h) > viewport_h {
-            break;
-        }
-        used = used.saturating_add(h);
-        count += 1;
-    }
-    count.max(1)
+    FloorLayout::build(posts, width, palette, images).floors_per_page(first_floor, viewport_h)
 }
 
 pub fn ensure_scroll_top(
     selected: usize,
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    if posts.is_empty() || viewport_h == 0 {
-        return 0;
-    }
-    let selected = selected.min(posts.len() - 1);
-    let offsets = floor_offsets(posts, width, palette, images);
-    let sel_top = offsets[selected];
-    let floor_h = measure_floor(
-        &posts[selected],
-        width,
-        palette,
-        images,
-        selected + 1 < posts.len(),
-    );
-    let sel_bottom = sel_top.saturating_add(floor_h);
-
-    if sel_top < scroll_top {
-        return sel_top;
-    }
-    if sel_bottom <= scroll_top.saturating_add(viewport_h) {
-        return scroll_top;
-    }
-
-    // Selected floor taller than viewport: scroll within floor, don't snap to top.
-    if floor_h > viewport_h {
-        let max_top = sel_bottom.saturating_sub(viewport_h);
-        return scroll_top.max(sel_top).min(max_top);
-    }
-
-    sel_bottom.saturating_sub(viewport_h)
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images)
+        .ensure_scroll_top(selected, scroll_top, viewport_h)
 }
 
 pub fn clamp_scroll_top(
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    if posts.is_empty() || viewport_h == 0 {
-        return 0;
-    }
-    let total = floor_list_total_height(posts, width, palette, images);
-    scroll_top.min(total.saturating_sub(viewport_h))
-}
-
-fn top_visible_floor_height(
-    scroll_top: u16,
-    posts: &[Post],
-    width: u16,
-    palette: Palette,
-    images: Option<&ImageCache>,
-) -> (usize, u16) {
-    let first = first_visible_floor(scroll_top, posts, width, palette, images);
-    let floor_h = measure_floor(
-        &posts[first],
-        width,
-        palette,
-        images,
-        first + 1 < posts.len(),
-    );
-    (first, floor_h)
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images).clamp_scroll_top(scroll_top, viewport_h)
 }
 
 /// Maximum `scroll_top` while the viewport bottom aligns with the floor bottom.
-fn floor_read_end_scroll(floor_top: u16, floor_h: u16, viewport_h: u16) -> u16 {
+fn floor_read_end_scroll(floor_top: DocY, floor_h: DocY, viewport_h: u16) -> DocY {
     let floor_bottom = floor_top.saturating_add(floor_h);
-    floor_bottom.saturating_sub(viewport_h).max(floor_top)
-}
-
-fn scroll_to_previous_floor(
-    first: usize,
-    posts: &[Post],
-    width: u16,
-    viewport_h: u16,
-    palette: Palette,
-    images: Option<&ImageCache>,
-) -> u16 {
-    if first == 0 {
-        return 0;
-    }
-    let offsets = floor_offsets(posts, width, palette, images);
-    let prev = first - 1;
-    let prev_top = offsets[prev];
-    let prev_h = measure_floor(
-        &posts[prev],
-        width,
-        palette,
-        images,
-        prev + 1 < posts.len(),
-    );
-    if prev_h > viewport_h {
-        floor_read_end_scroll(prev_top, prev_h, viewport_h)
-    } else {
-        prev_top
-    }
+    floor_bottom
+        .saturating_sub(u32::from(viewport_h))
+        .max(floor_top)
 }
 
 /// Line-wise detail scroll (wheel or j/k inside a tall floor). Tall floors snap to the next /
 /// previous floor instead of leaving the successor half off-screen.
 pub fn detail_line_scroll(
-    scroll_top: u16,
+    scroll_top: DocY,
     delta_lines: i32,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    if posts.is_empty() || viewport_h == 0 || delta_lines == 0 {
-        return scroll_top;
-    }
-    let total = floor_list_total_height(posts, width, palette, images);
-    let max_scroll = total.saturating_sub(viewport_h);
-
-    if delta_lines > 0 {
-        let step = delta_lines as u16;
-        if scroll_top >= max_scroll {
-            return max_scroll;
-        }
-        let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
-        if floor_h <= viewport_h {
-            return scroll_top.saturating_add(step).min(max_scroll);
-        }
-
-        let offsets = floor_offsets(posts, width, palette, images);
-        let floor_top = offsets[first];
-        let floor_end = floor_read_end_scroll(floor_top, floor_h, viewport_h);
-
-        if scroll_top >= floor_end {
-            if first + 1 < posts.len() {
-                return offsets[first + 1];
-            }
-            return max_scroll;
-        }
-
-        let candidate = scroll_top.saturating_add(step);
-        if candidate > floor_end {
-            if first + 1 < posts.len() {
-                return offsets[first + 1];
-            }
-            return floor_end.min(max_scroll);
-        }
-        candidate.min(max_scroll)
-    } else {
-        let step = (-delta_lines) as u16;
-        if scroll_top == 0 {
-            return 0;
-        }
-        let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
-        let offsets = floor_offsets(posts, width, palette, images);
-        let floor_top = offsets[first];
-
-        if floor_h <= viewport_h {
-            if scroll_top <= floor_top {
-                return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
-            }
-            let candidate = scroll_top.saturating_sub(step);
-            if candidate < floor_top {
-                return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
-            }
-            return candidate;
-        }
-
-        if scroll_top <= floor_top {
-            return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
-        }
-
-        let candidate = scroll_top.saturating_sub(step);
-        if candidate < floor_top {
-            return scroll_to_previous_floor(first, posts, width, viewport_h, palette, images);
-        }
-        candidate
-    }
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images).detail_line_scroll(
+        scroll_top,
+        delta_lines,
+        viewport_h,
+    )
 }
 
 /// j/Down: short floors advance one floor; tall floors scroll [`DETAIL_STEP_LINES`] lines.
 /// Selection follows the top visible floor.
 pub fn detail_step_down(
     selected: usize,
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> (usize, u16) {
-    if posts.is_empty() || viewport_h == 0 {
-        return (0, 0);
-    }
-    let selected = selected.min(posts.len() - 1);
-    let total = floor_list_total_height(posts, width, palette, images);
-    let max_scroll = total.saturating_sub(viewport_h);
-    if scroll_top >= max_scroll {
-        return (selected, max_scroll);
-    }
-
-    let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
-    let new_scroll = if floor_h > viewport_h {
-        detail_line_scroll(
-            scroll_top,
-            i32::from(DETAIL_STEP_LINES),
-            posts,
-            width,
-            viewport_h,
-            palette,
-            images,
-        )
-    } else {
-        let offsets = floor_offsets(posts, width, palette, images);
-        if first + 1 < posts.len() {
-            offsets[first + 1]
-        } else {
-            max_scroll
-        }
-    };
-    let new_selected = first_visible_floor(new_scroll, posts, width, palette, images);
-    (new_selected, new_scroll)
+) -> (usize, DocY) {
+    FloorLayout::build(posts, width, palette, images)
+        .detail_step_down(selected, scroll_top, viewport_h)
 }
 
 /// k/Up: short floors snap to the current floor top, then the previous floor; tall floors
 /// scroll [`DETAIL_STEP_LINES`] lines. Selection follows the top visible floor.
 pub fn detail_step_up(
     selected: usize,
-    scroll_top: u16,
+    scroll_top: DocY,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> (usize, u16) {
-    if posts.is_empty() || viewport_h == 0 {
-        return (0, 0);
-    }
-    let _ = selected.min(posts.len() - 1);
-    if scroll_top == 0 {
-        return (0, 0);
-    }
-
-    let (first, floor_h) = top_visible_floor_height(scroll_top, posts, width, palette, images);
-    let new_scroll = if floor_h > viewport_h {
-        detail_line_scroll(
-            scroll_top,
-            -i32::from(DETAIL_STEP_LINES),
-            posts,
-            width,
-            viewport_h,
-            palette,
-            images,
-        )
-    } else {
-        let offsets = floor_offsets(posts, width, palette, images);
-        let floor_top = offsets[first];
-        if scroll_top > floor_top {
-            floor_top
-        } else if first > 0 {
-            offsets[first - 1]
-        } else {
-            0
-        }
-    };
-    let new_selected = first_visible_floor(new_scroll, posts, width, palette, images);
-    (new_selected, new_scroll)
+) -> (usize, DocY) {
+    FloorLayout::build(posts, width, palette, images)
+        .detail_step_up(selected, scroll_top, viewport_h)
 }
 
 pub fn page_scroll_top(
-    scroll_top: u16,
+    scroll_top: DocY,
     delta: i32,
     posts: &[Post],
     width: u16,
     viewport_h: u16,
     palette: Palette,
     images: Option<&ImageCache>,
-) -> u16 {
-    if posts.is_empty() || viewport_h == 0 {
-        return 0;
-    }
-    let offsets = floor_offsets(posts, width, palette, images);
-    let first = first_visible_floor(scroll_top, posts, width, palette, images);
-    let page_size = floors_per_page(first, posts, width, viewport_h, palette, images);
-
-    let target_floor = if delta > 0 {
-        (first + page_size).min(posts.len().saturating_sub(1))
-    } else {
-        first.saturating_sub(page_size)
-    };
-
-    offsets[target_floor]
+) -> DocY {
+    FloorLayout::build(posts, width, palette, images).page_scroll_top(scroll_top, delta, viewport_h)
 }
 
 pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListProps<'_>) {
@@ -571,17 +585,43 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
         return;
     }
     clear_content_viewport(frame, area);
-    let viewport_bottom = props.scroll_top.saturating_add(area.height);
-    let mut logical_top = 0u16;
+    let viewport_bottom = props.scroll_top.saturating_add(u32::from(area.height));
 
-    for (idx, post) in props.posts.iter().enumerate() {
-        let floor_h = measure_floor(
-            post,
-            area.width,
-            props.palette,
-            props.images.as_deref(),
-            idx + 1 < props.posts.len(),
-        );
+    // Prefer precomputed heights: O(1) jump to first visible floor, no re-wrap for off-screen.
+    let cached = props
+        .layout
+        .filter(|l| l.matches(area.width, props.posts.len()));
+    let start = cached
+        .map(|l| l.first_visible(props.scroll_top))
+        .unwrap_or(0);
+    let mut logical_top = cached.map(|l| l.offset(start)).unwrap_or_else(|| {
+        // Fallback: measure floors above the viewport once (should be rare without cache).
+        let mut top = 0u32;
+        for (idx, post) in props.posts.iter().enumerate().take(start) {
+            top = top.saturating_add(measure_floor(
+                post,
+                area.width,
+                props.palette,
+                props.images.as_deref(),
+                idx + 1 < props.posts.len(),
+            ));
+        }
+        top
+    });
+
+    for idx in start..props.posts.len() {
+        let post = &props.posts[idx];
+        let floor_h = if let Some(layout) = cached {
+            layout.height(idx)
+        } else {
+            measure_floor(
+                post,
+                area.width,
+                props.palette,
+                props.images.as_deref(),
+                idx + 1 < props.posts.len(),
+            )
+        };
         let floor_bottom = logical_top.saturating_add(floor_h);
 
         if floor_bottom <= props.scroll_top {
@@ -600,10 +640,11 @@ pub fn draw_floor_list(frame: &mut Frame<'_>, area: Rect, mut props: FloorListPr
             continue;
         }
 
-        let draw_y = area
-            .y
-            .saturating_add(visible_top.saturating_sub(props.scroll_top));
-        let draw_h = visible_bottom.saturating_sub(visible_top);
+        // Relative offsets are within the viewport → always fit in u16.
+        let rel_y = visible_top.saturating_sub(props.scroll_top);
+        let rel_h = visible_bottom.saturating_sub(visible_top);
+        let draw_y = area.y.saturating_add(rel_y as u16);
+        let draw_h = rel_h as u16;
         draw_floor(
             frame,
             area,
@@ -639,9 +680,9 @@ fn draw_floor(
     palette: Palette,
     show_avatar: bool,
     images: &mut Option<&mut ImageCache>,
-    scroll_top: u16,
-    floor_top: u16,
-    skip_lines: u16,
+    scroll_top: DocY,
+    floor_top: DocY,
+    skip_lines: DocY,
     draw_separator: bool,
     mask_cjk: bool,
 ) {
@@ -690,11 +731,11 @@ fn draw_floor(
     };
 
     let mut y = area.y;
-    let mut line_idx = 0u16;
+    let mut line_idx: DocY = 0;
     let mut header_top = None;
 
     let next_visible_row =
-        |frame: &mut Frame<'_>, y: &mut u16, line_idx: &mut u16, draw_bar: bool| -> bool {
+        |frame: &mut Frame<'_>, y: &mut u16, line_idx: &mut DocY, draw_bar: bool| -> bool {
             if *line_idx < skip_lines {
                 *line_idx += 1;
                 return true;
@@ -749,7 +790,7 @@ fn draw_floor(
     }
     if show_avatar {
         if let Some(cache) = images.as_deref() {
-            if header_top.is_some() || floor_top + HEADER_H > scroll_top {
+            if header_top.is_some() || floor_top + u32::from(HEADER_H) > scroll_top {
                 let (avatar, placeholder) =
                     cache.avatar_entries_for_draw(post.avatar_url.as_deref());
                 let entry = avatar
@@ -764,7 +805,7 @@ fn draw_floor(
                     palette,
                     "",
                     body.x,
-                    i32::from(floor_top),
+                    floor_top as i32,
                     scroll_top,
                 );
             }
@@ -780,15 +821,17 @@ fn draw_floor(
     if poll_h > 0 {
         if let Some(poll) = &post.poll {
             let poll_start = line_idx;
-            while line_idx < poll_start.saturating_add(poll_h) && line_idx < skip_lines {
+            let poll_h_doc = u32::from(poll_h);
+            while line_idx < poll_start.saturating_add(poll_h_doc) && line_idx < skip_lines {
                 line_idx += 1;
             }
-            if line_idx < poll_start.saturating_add(poll_h) && y < area.y + area.height {
-                let poll_skip = line_idx.saturating_sub(poll_start);
+            if line_idx < poll_start.saturating_add(poll_h_doc) && y < area.y + area.height {
+                let poll_skip = line_idx.saturating_sub(poll_start) as u16;
+                let remaining = u32::from(area.y + area.height - y);
                 let poll_visible = poll_start
-                    .saturating_add(poll_h)
+                    .saturating_add(poll_h_doc)
                     .saturating_sub(line_idx)
-                    .min(area.y + area.height - y);
+                    .min(remaining) as u16;
                 if poll_visible > 0 && line_idx >= skip_lines {
                     for row in 0..poll_visible {
                         draw_nav_bar(frame, area.x, y + row, selected, palette);
@@ -808,7 +851,7 @@ fn draw_floor(
                     y = y.saturating_add(poll_visible);
                 }
             }
-            line_idx = poll_start.saturating_add(poll_h);
+            line_idx = poll_start.saturating_add(poll_h_doc);
         }
     }
 
@@ -939,10 +982,10 @@ fn render_image_block(
     palette: Palette,
     selected: bool,
     y: &mut u16,
-    line_idx: &mut u16,
-    scroll_top: u16,
-    floor_top: u16,
-    skip_lines: u16,
+    line_idx: &mut DocY,
+    scroll_top: DocY,
+    floor_top: DocY,
+    skip_lines: DocY,
     kind: ImageKind,
     cache_key: &str,
     _width: u16,
@@ -951,26 +994,27 @@ fn render_image_block(
     doc_x: u16,
 ) -> bool {
     let block_start = *line_idx;
-    let doc_y = i32::from(floor_top.saturating_add(block_start));
+    let doc_y = (floor_top.saturating_add(block_start)) as i32;
     let pos_y = doc_y - scroll_top as i32;
     let bottom_margin = images
         .as_deref()
         .map(|cache| graphics_bottom_margin(cache.picker(), kind))
         .unwrap_or(0);
 
-    while *line_idx < block_start.saturating_add(height) && *line_idx < skip_lines {
+    let height_doc = u32::from(height);
+    while *line_idx < block_start.saturating_add(height_doc) && *line_idx < skip_lines {
         *line_idx += 1;
     }
-    if *line_idx >= block_start.saturating_add(height) {
+    if *line_idx >= block_start.saturating_add(height_doc) {
         return false;
     }
     let image_viewport_h = viewport.height.saturating_sub(bottom_margin).max(1);
     if pos_y >= image_viewport_h as i32 {
-        *line_idx = block_start.saturating_add(height);
+        *line_idx = block_start.saturating_add(height_doc);
         return true;
     }
-    if pos_y + height as i32 <= 0 {
-        *line_idx = block_start.saturating_add(height);
+    if pos_y + i32::from(height) <= 0 {
+        *line_idx = block_start.saturating_add(height_doc);
         return false;
     }
     if *y >= area.y + area.height {
@@ -979,7 +1023,7 @@ fn render_image_block(
 
     let remaining_h = area.y.saturating_add(area.height).saturating_sub(*y);
     if remaining_h > 0 && *line_idx >= skip_lines {
-        let slice_skip = line_idx.saturating_sub(block_start);
+        let slice_skip = (*line_idx).saturating_sub(block_start) as u16;
         let rows_in_view = height.saturating_sub(slice_skip).min(remaining_h);
         for row in 0..rows_in_view {
             draw_nav_bar(frame, area.x, *y + row, selected, palette);
@@ -1002,7 +1046,7 @@ fn render_image_block(
         }
         *y = y.saturating_add(rows_in_view);
     }
-    *line_idx = block_start.saturating_add(height);
+    *line_idx = block_start.saturating_add(height_doc);
     *y >= area.y.saturating_add(area.height)
 }
 
@@ -1018,10 +1062,10 @@ fn render_inline_row(
     selected: bool,
     mask_cjk: bool,
     y: &mut u16,
-    line_idx: &mut u16,
-    scroll_top: u16,
-    floor_top: u16,
-    skip_lines: u16,
+    line_idx: &mut DocY,
+    scroll_top: DocY,
+    floor_top: DocY,
+    skip_lines: DocY,
     parts: &[InlinePart],
 ) -> bool {
     let height = parts
@@ -1032,13 +1076,14 @@ fn render_inline_row(
         })
         .max()
         .unwrap_or(1);
+    let height_doc = u32::from(height);
     let block_start = *line_idx;
-    let doc_y = i32::from(floor_top.saturating_add(block_start));
+    let doc_y = (floor_top.saturating_add(block_start)) as i32;
 
-    while *line_idx < block_start.saturating_add(height) && *line_idx < skip_lines {
+    while *line_idx < block_start.saturating_add(height_doc) && *line_idx < skip_lines {
         *line_idx += 1;
     }
-    if *line_idx >= block_start.saturating_add(height) {
+    if *line_idx >= block_start.saturating_add(height_doc) {
         return false;
     }
     if *y >= area.y + area.height {
@@ -1047,7 +1092,7 @@ fn render_inline_row(
 
     let remaining_h = area.y.saturating_add(area.height).saturating_sub(*y);
     if remaining_h > 0 && *line_idx >= skip_lines {
-        let slice_skip = line_idx.saturating_sub(block_start);
+        let slice_skip = (*line_idx).saturating_sub(block_start) as u16;
         let rows_in_view = height.saturating_sub(slice_skip).min(remaining_h);
         for row in 0..rows_in_view {
             draw_nav_bar(frame, area.x, *y + row, selected, palette);
@@ -1083,10 +1128,7 @@ fn render_inline_row(
                         x = x.saturating_add(w);
                     }
                     InlinePart::Smiley {
-                        key,
-                        width,
-                        failed,
-                        ..
+                        key, width, failed, ..
                     } => {
                         let fail_label = if *failed { IMAGE_FAIL_LABEL } else { "…" };
                         if let Some(cache) = images.as_deref() {
@@ -1111,7 +1153,7 @@ fn render_inline_row(
         }
         *y = y.saturating_add(rows_in_view);
     }
-    *line_idx = block_start.saturating_add(height);
+    *line_idx = block_start.saturating_add(height_doc);
     *y >= area.y.saturating_add(area.height)
 }
 
@@ -1234,13 +1276,12 @@ mod tests {
         let posts = vec![sample_post(); 6];
         let palette = Palette::default();
         let h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = h; // one floor tall → mid-list scroll is valid
+        let viewport = u16::try_from(h).expect("short floor"); // one floor tall → mid-list scroll is valid
         let scroll = h + 3; // mid floor 1
         let anchor = capture_detail_scroll_anchor(scroll, &posts, 80, palette, None);
         assert_eq!(anchor.floor, 1);
         assert_eq!(anchor.offset_in_floor, 3);
-        let restored =
-            restore_detail_scroll_anchor(anchor, &posts, 80, viewport, palette, None);
+        let restored = restore_detail_scroll_anchor(anchor, &posts, 80, viewport, palette, None);
         assert_eq!(restored, scroll);
     }
 
@@ -1249,7 +1290,7 @@ mod tests {
         let post = sample_post();
         let palette = Palette::default();
         let h = measure_floor(&post, 80, palette, None, false);
-        let without_gap = HEADER_H + 1;
+        let without_gap = u32::from(HEADER_H + 1);
         assert!(h > without_gap);
     }
 
@@ -1258,7 +1299,7 @@ mod tests {
         let posts = vec![sample_post(); 6];
         let palette = Palette::default();
         let h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = h * 4;
+        let viewport = u16::try_from(h).expect("short floor") * 4;
         let scroll = ensure_scroll_top(4, 0, &posts, 80, viewport, palette, None);
         assert_eq!(scroll, h);
     }
@@ -1286,7 +1327,7 @@ mod tests {
         let posts = vec![sample_post(); 8];
         let palette = Palette::default();
         let h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = h * 4;
+        let viewport = u16::try_from(h).expect("short floor") * 4;
         let next = page_scroll_top(0, 1, &posts, 80, viewport, palette, None);
         assert_eq!(next, h * 4);
     }
@@ -1308,15 +1349,17 @@ mod tests {
         let posts = vec![sample_post(); 8];
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = floor_h.saturating_mul(3);
-        assert!(floor_h <= viewport);
+        let viewport = u16::try_from(floor_h)
+            .expect("short floor")
+            .saturating_mul(3);
+        assert!(floor_h <= u32::from(viewport));
 
         let (sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
         assert_eq!(scroll, floor_h);
         assert_eq!(sel, 1);
 
         let max_scroll =
-            floor_list_total_height(&posts, 80, palette, None).saturating_sub(viewport);
+            floor_list_total_height(&posts, 80, palette, None).saturating_sub(u32::from(viewport));
         let (sel, scroll) = detail_step_down(2, max_scroll, &posts, 80, viewport, palette, None);
         assert_eq!(sel, 2);
         assert_eq!(scroll, max_scroll);
@@ -1328,10 +1371,13 @@ mod tests {
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, false);
         let viewport = 12u16;
-        assert!(floor_h > viewport, "floor_h={floor_h} viewport={viewport}");
+        assert!(
+            floor_h > u32::from(viewport),
+            "floor_h={floor_h} viewport={viewport}"
+        );
 
         let (sel, scroll) = detail_step_down(0, 0, &posts, 80, viewport, palette, None);
-        assert_eq!(scroll, DETAIL_STEP_LINES);
+        assert_eq!(scroll, u32::from(DETAIL_STEP_LINES));
         assert_eq!(sel, 0);
     }
 
@@ -1340,7 +1386,9 @@ mod tests {
         let posts = vec![sample_post(); 4];
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = floor_h.saturating_mul(3);
+        let viewport = u16::try_from(floor_h)
+            .expect("short floor")
+            .saturating_mul(3);
         let offsets = floor_offsets(&posts, 80, palette, None);
 
         let (sel, scroll) = detail_step_up(2, offsets[2] + 1, &posts, 80, viewport, palette, None);
@@ -1362,10 +1410,13 @@ mod tests {
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, false);
         let viewport = 12u16;
-        assert!(floor_h > viewport, "floor_h={floor_h} viewport={viewport}");
+        assert!(
+            floor_h > u32::from(viewport),
+            "floor_h={floor_h} viewport={viewport}"
+        );
 
         let (sel, scroll) = detail_step_up(0, 15, &posts, 80, viewport, palette, None);
-        assert_eq!(scroll, 15 - DETAIL_STEP_LINES);
+        assert_eq!(scroll, 15 - u32::from(DETAIL_STEP_LINES));
         assert_eq!(sel, 0);
     }
 
@@ -1376,7 +1427,7 @@ mod tests {
         let viewport = 12u16;
         let offsets = floor_offsets(&posts, 80, palette, None);
         let floor_h = measure_floor(&posts[0], 80, palette, None, true);
-        assert!(floor_h > viewport);
+        assert!(floor_h > u32::from(viewport));
         let floor_end = floor_read_end_scroll(offsets[0], floor_h, viewport);
 
         let scroll = detail_line_scroll(
@@ -1390,7 +1441,7 @@ mod tests {
         );
         assert_eq!(scroll, offsets[1]);
 
-        let near_end = floor_end.saturating_sub(DETAIL_STEP_LINES.saturating_sub(1));
+        let near_end = floor_end.saturating_sub(u32::from(DETAIL_STEP_LINES.saturating_sub(1)));
         let scroll = detail_line_scroll(
             near_end,
             i32::from(DETAIL_STEP_LINES),
@@ -1429,12 +1480,84 @@ mod tests {
         let posts = vec![sample_post(); 6];
         let palette = Palette::default();
         let floor_h = measure_floor(&posts[0], 80, palette, None, true);
-        let viewport = floor_h.saturating_mul(2);
+        let viewport = u16::try_from(floor_h)
+            .expect("short floor")
+            .saturating_mul(2);
         let scroll = floor_h.saturating_mul(3);
         let last = last_visible_floor(scroll, &posts, 80, viewport, palette, None);
         assert!(
             last >= 3,
             "last visible should be near viewport bottom, got {last}"
         );
+    }
+
+    #[test]
+    fn floor_layout_matches_legacy_helpers() {
+        let posts = vec![sample_post(); 40];
+        let palette = Palette::default();
+        let layout = FloorLayout::build(&posts, 80, palette, None);
+        assert_eq!(
+            layout.total,
+            floor_list_total_height(&posts, 80, palette, None)
+        );
+        assert_eq!(layout.offsets, floor_offsets(&posts, 80, palette, None));
+        let scroll = layout.total / 3;
+        assert_eq!(
+            layout.first_visible(scroll),
+            first_visible_floor(scroll, &posts, 80, palette, None)
+        );
+    }
+
+    /// Cached layout queries stay cheap relative to a full rebuild (regression guard for
+    /// per-frame O(n) re-wrap). Times are machine-dependent; we only assert a large ratio.
+    #[test]
+    fn floor_layout_cache_avoids_per_query_rebuild_cost() {
+        use std::time::Instant;
+
+        let posts = vec![sample_post(); 500];
+        let palette = Palette::default();
+        let layout = FloorLayout::build(&posts, 80, palette, None);
+
+        let t0 = Instant::now();
+        for i in 0..200 {
+            let _ = layout.first_visible((i as u32).wrapping_mul(17));
+            let _ = layout.last_visible((i as u32).wrapping_mul(13), 40);
+            let _ = layout.clamp_scroll_top((i as u32).wrapping_mul(11), 40);
+        }
+        let cached = t0.elapsed();
+
+        let t1 = Instant::now();
+        for i in 0..20 {
+            let scroll = (i as u32).wrapping_mul(17);
+            let _ = first_visible_floor(scroll, &posts, 80, palette, None);
+            let _ = last_visible_floor(scroll, &posts, 80, 40, palette, None);
+            let _ = clamp_scroll_top(scroll, &posts, 80, 40, palette, None);
+        }
+        let rebuilt = t1.elapsed();
+
+        // 200 cached queries vs 20 full rebuilds: cache path should still win by a wide margin.
+        assert!(
+            cached * 5 < rebuilt,
+            "cached {cached:?} should be much cheaper than rebuild path {rebuilt:?}"
+        );
+    }
+
+    #[test]
+    fn floor_layout_handles_document_beyond_u16() {
+        // Synthetic tall single floor: heights sum past u16::MAX must not wrap.
+        let layout = FloorLayout {
+            width: 80,
+            heights: vec![40_000, 40_000],
+            offsets: vec![0, 40_000],
+            total: 80_000,
+        };
+        assert_eq!(layout.total, 80_000);
+        assert_eq!(layout.first_visible(70_000), 1);
+        assert_eq!(layout.clamp_scroll_top(100_000, 40), 79_960);
+        let anchor = layout.capture_scroll_anchor(70_000);
+        assert_eq!(anchor.floor, 1);
+        assert_eq!(anchor.offset_in_floor, 30_000);
+        let restored = layout.restore_scroll_anchor(anchor, 40);
+        assert_eq!(restored, 70_000);
     }
 }

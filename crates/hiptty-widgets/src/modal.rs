@@ -47,7 +47,10 @@ pub fn begin_modal<'a>(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(palette.accent_style())
-        .title(Span::styled(format!(" {title} "), palette.foreground_style()))
+        .title(Span::styled(
+            format!(" {title} "),
+            palette.foreground_style(),
+        ))
         .title_alignment(Alignment::Center)
         .style(palette.modal_surface_style());
     let inner = block.inner(dialog);
@@ -60,11 +63,7 @@ pub fn begin_modal<'a>(
         0
     };
     let chunks = if footer_lines > 0 {
-        Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(footer_lines),
-        ])
-        .split(inner)
+        Layout::vertical([Constraint::Min(1), Constraint::Length(footer_lines)]).split(inner)
     } else {
         [inner, Rect::default()].into()
     };
@@ -94,11 +93,7 @@ pub fn begin_modal<'a>(
     }
 }
 
-pub fn draw_menu_item(
-    palette: Palette,
-    label: &str,
-    selected: bool,
-) -> Line<'static> {
+pub fn draw_menu_item(palette: Palette, label: &str, selected: bool) -> Line<'static> {
     let prefix = if selected { "▸ " } else { "  " };
     let style = if selected {
         palette.accent_style().add_modifier(Modifier::BOLD)

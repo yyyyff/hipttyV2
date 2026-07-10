@@ -73,11 +73,19 @@
   - **修复**: `[patch.crates-io]` → `vendor/ratatui-image`（基于 11.0.6），见 `vendor/ratatui-image/PATCHES.md`。  
   - 与 §4.1 guard band、Kitty placement 清理是不同路径；勿用每帧 guard band 顶替。  
 - **图片缓存**: Content/Avatar/Smiley 均为进程内 `ImageCache` 内存缓存（decode + 协议数据）。同会话再进帖不会再占位；**无** Content 磁盘缓存。Avatar 另有 `AvatarDiskCache`。  
-- **详情图片性能（2026-07-09）**:  
+  - 内存：最多 `MAX_MEMORY_ENTRIES`（256）条；溢出时淘汰非 `Loading` 的最旧条目。  
+  - 磁盘头像：启动/`new` 时 `purge`（按 TTL 清理 + 总文件数/字节预算）。  
+  - 下载：`get_bytes` 仅 http(s)，`Content-Length`/流式均硬限 8 MiB；解码侧限边长与像素数。  
+- **详情图片性能（2026-07-09，2026-07-10 修正）**:  
   - 视口懒加载：只 prefetch 可见楼层 ±1，滚动时再补；HTTP 并发上限 3。  
+  - **真并发**：`FetchImage` 在 worker 内 `tokio::spawn`（与页面加载/发帖串行队列解耦）；此前「并发 3」只是入队深度，实际仍串行。  
   - 解码线程池：2–4 worker（非单线程）。  
   - Loading 占位高度按 `max_cols/2` 估（8–20），宽度用满内容列，减轻撑开。  
   - 滚动保持：decode 前后用 `(floor, offset_in_floor)` 锚点，禁止吸附楼顶（修「图未出完就滚再弹回」）。  
+- **详情布局缓存（2026-07-10）**:  
+  - 此前每 50ms 帧对**全部**楼层重复 `layout_post_blocks`/换行（`floor_list_total_height` + scroll anchor + `draw_floor_list` 各扫一遍）；1000 楼仅计算即可 ~48ms，逼近帧预算。  
+  - 现：`FloorLayout` 单次构建 heights/offsets/total，缓存在 `DetailState::layout`；宽变/帖变/图片 decode 完成时失效。  
+  - 绘制用缓存高度 O(1) 跳到首可见楼，仅对可见楼再 `layout_post_blocks` 出画。  
 - **Kitty placement 清理（2026-07-09）**:  
   - `clear_content_viewport` / `clear_graphics_in_area` **仍每帧** `clear_rect` + `fill_area_spaces`（Sixel/格子覆盖）。  
   - Kitty `d=y`（`clear_terminal_placements_in_area`）**仅在 geometry dirty 时**发送：scroll / 翻页 / resize / 图 decode / 首帧。由 `begin_frame_graphics` + `App::graphics_dirty` 控制。  
@@ -106,7 +114,7 @@
 |----|------|--------|
 | 详情看图 `v` / `:i#N` | 完整看图流程（外部查看器或终端内预览）。 | 低 |
 | 多 Profile 凭证管理 | CLI/TUI 仅有 `--profile` 参数（默认 `default`），文件为 `{profile}.credentials.json` + `{profile}.session.json`。**无 UI 切换/增删 profile**；应在设置或登录页管理多账号凭证。 | 中 |
-| 完整登出 | 见 §5.4 现状；可选补 `adapter.logout()` + 删 `session.json`。 | 低（可不做） |
+| ~~完整登出~~ | **已做（2026-07-10）**：见 §5.4。 | — |
 | 发帖插图 | 见 §5.5；当前 Ctrl+I 路径输入方案废弃，需重新设计交互。 | 中 |
 | 黑名单管理 UI | 见 §5.6；仅显示人数 stub。 | 低 |
 | 详情 `F` 收藏 | plan 非阻塞项。 | 低 |
@@ -125,19 +133,13 @@
 
 ### 5.4 登出 — 当前行为说明
 
-`:logout` 与命令栏 `logout` 当前逻辑（`commands.rs`）：
+`:logout` / 命令栏 `logout`（`commands.rs` + `worker`，2026-07-10 起完整）：
 
-1. 删除 `{profile}.credentials.json`（`clear_credentials`）
-2. 内存里 `session.logged_in = false`、`username = None`
-3. 跳转 Login 屏
+1. 删除 `{profile}.credentials.json`（`clear_credentials`，阻止 AutoLogin）
+2. 发 `WorkerRequest::Logout` → `ForumClient::logout()`：清空内存 cookie jar，persist 空 jar，并删除 `{profile}.session.json`
+3. UI：`session.logged_in = false`、清 username/uid/未读标记，跳转 Login
 
-**未做**：
-
-- 未调用 `ForumClient::logout()`（adapter 会 `clear_cookie_store` 并写回 session 文件）
-- 未删除 `{profile}.session.json`（cookie 文件仍留在磁盘）
-- worker 进程内 HTTP client 的 cookie jar 未清空（直到进程退出）
-
-因此「清本地 session」在 plan 里指删 `session.json` + 清 cookie；**现实现只清了 credentials，session 文件与内存 cookie 仍在**。多 profile 下其它 profile 文件不受影响。按当前共识可维持现状，完整登出列入 §5.2。
+多 profile 下其它 profile 文件不受影响。
 
 ### 5.5 发帖插图 — 当前行为
 
@@ -219,3 +221,6 @@
 | 2026-07-09 | §4.3：vendor patch `ratatui-image` 修复 Sixel skip+drop 溢出残图 |
 | 2026-07-09 | §4.3：详情图视口懒加载、解码池、占位高度、scroll 楼内锚点 |
 | 2026-07-09 | §4.3：Kitty `d=y` 仅 geometry dirty 时发送；guard band 仍废弃 |
+| 2026-07-10 | §4.3：FetchImage 真并发；内存/磁盘缓存上限；下载 8 MiB + 解码像素限制 |
+| 2026-07-10 | §4.3：详情 `FloorLayout` 缓存，消除每帧全帖 re-wrap |
+| 2026-07-10 | 详情文档坐标 `DocY=u32`；完整 logout 清 cookie/session |

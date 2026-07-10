@@ -278,116 +278,62 @@ fn handle_detail_key(
             app.detail.error = None;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
-                let palette = app.palette();
+            if app.detail.detail.is_some() {
                 let viewport = app.scroll_viewport_height();
-                let width = app.content_width();
-                let (selected, scroll_top) = {
-                    let images = app.images();
-                    hiptty_widgets::detail_step_down(
-                        app.detail.selected,
-                        app.detail.scroll_top,
-                        posts,
-                        width,
-                        viewport,
-                        palette,
-                        images,
-                    )
-                };
-                app.detail.selected = selected;
-                app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
-                    scroll_top,
-                    posts,
-                    width,
-                    viewport,
-                    palette,
-                    app.images(),
-                );
+                let selected = app.detail.selected;
+                let scroll_top = app.detail.scroll_top;
+                if let Some((sel, scroll)) = app.detail_layout().map(|layout| {
+                    let (sel, scroll) = layout.detail_step_down(selected, scroll_top, viewport);
+                    (sel, layout.clamp_scroll_top(scroll, viewport))
+                }) {
+                    app.detail.selected = sel;
+                    app.detail.scroll_top = scroll;
+                }
                 maybe_load_more_detail(app, worker_tx);
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
-                let palette = app.palette();
+            if app.detail.detail.is_some() {
                 let viewport = app.scroll_viewport_height();
-                let width = app.content_width();
-                let (selected, scroll_top) = {
-                    let images = app.images();
-                    hiptty_widgets::detail_step_up(
-                        app.detail.selected,
-                        app.detail.scroll_top,
-                        posts,
-                        width,
-                        viewport,
-                        palette,
-                        images,
-                    )
-                };
-                app.detail.selected = selected;
-                app.detail.scroll_top = hiptty_widgets::clamp_scroll_top(
-                    scroll_top,
-                    posts,
-                    width,
-                    viewport,
-                    palette,
-                    app.images(),
-                );
+                let selected = app.detail.selected;
+                let scroll_top = app.detail.scroll_top;
+                if let Some((sel, scroll)) = app.detail_layout().map(|layout| {
+                    let (sel, scroll) = layout.detail_step_up(selected, scroll_top, viewport);
+                    (sel, layout.clamp_scroll_top(scroll, viewport))
+                }) {
+                    app.detail.selected = sel;
+                    app.detail.scroll_top = scroll;
+                }
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::PageDown => {
-            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
-                let palette = app.palette();
+            if app.detail.detail.is_some() {
                 let viewport = app.scroll_viewport_height();
-                let width = app.content_width();
-                app.detail.scroll_top = {
-                    let images = app.images();
-                    hiptty_widgets::page_scroll_top(
-                        app.detail.scroll_top,
-                        1,
-                        posts,
-                        width,
-                        viewport,
-                        palette,
-                        images,
-                    )
-                };
-                app.detail.selected = hiptty_widgets::first_visible_floor(
-                    app.detail.scroll_top,
-                    posts,
-                    width,
-                    palette,
-                    app.images(),
-                );
+                let scroll_top = app.detail.scroll_top;
+                if let Some((scroll, sel)) = app.detail_layout().map(|layout| {
+                    let scroll = layout.page_scroll_top(scroll_top, 1, viewport);
+                    (scroll, layout.first_visible(scroll))
+                }) {
+                    app.detail.scroll_top = scroll;
+                    app.detail.selected = sel;
+                }
                 maybe_load_more_detail(app, worker_tx);
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
         KeyCode::PageUp => {
-            if let Some(posts) = app.detail.detail.as_ref().map(|d| d.posts.as_slice()) {
-                let palette = app.palette();
+            if app.detail.detail.is_some() {
                 let viewport = app.scroll_viewport_height();
-                let width = app.content_width();
-                app.detail.scroll_top = {
-                    let images = app.images();
-                    hiptty_widgets::page_scroll_top(
-                        app.detail.scroll_top,
-                        -1,
-                        posts,
-                        width,
-                        viewport,
-                        palette,
-                        images,
-                    )
-                };
-                app.detail.selected = hiptty_widgets::first_visible_floor(
-                    app.detail.scroll_top,
-                    posts,
-                    width,
-                    palette,
-                    app.images(),
-                );
+                let scroll_top = app.detail.scroll_top;
+                if let Some((scroll, sel)) = app.detail_layout().map(|layout| {
+                    let scroll = layout.page_scroll_top(scroll_top, -1, viewport);
+                    (scroll, layout.first_visible(scroll))
+                }) {
+                    app.detail.scroll_top = scroll;
+                    app.detail.selected = sel;
+                }
                 prefetch_detail_viewport_images(app, worker_tx);
             }
         }
@@ -448,28 +394,31 @@ pub fn maybe_load_more_detail(app: &mut App, worker_tx: &mpsc::UnboundedSender<W
     if app.detail.loading || app.detail.loading_more {
         return;
     }
-    let Some(detail) = app.detail.detail.as_ref() else {
+    let page = app.detail.detail.as_ref().map(|d| d.page);
+    let last_page = app.detail.detail.as_ref().map(|d| d.last_page);
+    let post_count = app
+        .detail
+        .detail
+        .as_ref()
+        .map(|d| d.posts.len())
+        .unwrap_or(0);
+    let (Some(page), Some(last_page)) = (page, last_page) else {
         return;
     };
-    if detail.page >= detail.last_page || detail.posts.is_empty() {
+    if page >= last_page || post_count == 0 {
         return;
     }
     let viewport = app.scroll_viewport_height();
-    let palette = app.palette();
-    let images = app.images();
-    let last_visible = hiptty_widgets::last_visible_floor(
-        app.detail.scroll_top,
-        &detail.posts,
-        app.content_width(),
-        viewport,
-        palette,
-        images,
-    );
-    let remaining_floors = detail.posts.len().saturating_sub(last_visible + 1);
+    let scroll_top = app.detail.scroll_top;
+    let Some(layout) = app.detail_layout() else {
+        return;
+    };
+    let last_visible = layout.last_visible(scroll_top, viewport);
+    let remaining_floors = post_count.saturating_sub(last_visible + 1);
     if remaining_floors > 2 {
         return;
     }
-    request_thread_detail(app, worker_tx, detail.page + 1, DetailFetchMode::Append);
+    request_thread_detail(app, worker_tx, page + 1, DetailFetchMode::Append);
 }
 
 pub fn maybe_load_more(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
@@ -567,10 +516,7 @@ pub fn handle_worker_response(
                 if manual {
                     app.login.error = Some(error_message(&err));
                 } else {
-                    app.set_toast(
-                        format!("自动登录失败: {}", error_message(&err)),
-                        true,
-                    );
+                    app.set_toast(format!("自动登录失败: {}", error_message(&err)), true);
                     app.page = Page::Login;
                 }
             }
@@ -761,6 +707,12 @@ pub fn handle_worker_response(
                 }
             }
         }
+        WorkerResponse::LoggedOut { result } => {
+            // UI already switched to Login; surface adapter errors if cookie clear failed.
+            if let Err(err) = result {
+                app.set_toast(format!("登出清理失败: {err}"), true);
+            }
+        }
         WorkerResponse::ComposerImageUploaded { .. } => {
             // Image insert path removed from TUI; ignore late upload responses.
         }
@@ -814,15 +766,14 @@ pub fn prefetch_detail_viewport_images(
     let width = app.content_width();
     let viewport = app.scroll_viewport_height();
     let scroll = app.detail.scroll_top;
-    let palette = app.palette();
     let (first, last) = {
-        let images = app.images();
-        let first =
-            hiptty_widgets::first_visible_floor(scroll, &posts, width, palette, images);
-        let last = hiptty_widgets::last_visible_floor(
-            scroll, &posts, width, viewport, palette, images,
-        );
-        (first, last)
+        let Some(layout) = app.detail_layout() else {
+            return;
+        };
+        (
+            layout.first_visible(scroll),
+            layout.last_visible(scroll, viewport),
+        )
     };
     let start = first.saturating_sub(DETAIL_IMAGE_PREFETCH_PAD);
     let end = last
@@ -1201,6 +1152,7 @@ fn apply_post_success(
                     loading_more: false,
                     pending_fetch: None,
                     error: None,
+                    layout: None,
                 };
                 if app.detail.detail.is_none() {
                     request_thread_detail(app, worker_tx, 1, DetailFetchMode::Replace);
@@ -1220,6 +1172,7 @@ fn apply_post_success(
                 app.detail.loading_more = false;
                 app.detail.pending_fetch = None;
                 app.detail.error = None;
+                app.invalidate_detail_layout();
                 prefetch_detail_images(app, worker_tx);
                 app.sync_detail_scroll();
             } else if app.page == Page::ThreadDetail {
