@@ -85,12 +85,15 @@ struct DecodeJob {
     url: String,
     kind: ImageKind,
     bytes: Vec<u8>,
+    /// Session generation when the job was enqueued; stale after logout/login.
+    generation: u64,
 }
 
 struct DecodeResult {
     url: String,
     kind: ImageKind,
     result: Result<DecodeOutput, ()>,
+    generation: u64,
 }
 
 struct DecodeOutput {
@@ -127,6 +130,8 @@ pub struct ImageCache {
     memory_bytes: u64,
     /// URLs in the current viewport (± pad). Soft budget must not evict these.
     pinned_urls: HashSet<String>,
+    /// Bumped on logout/login so in-flight decode results cannot repopulate the cache.
+    generation: u64,
     job_tx: DecodeJobTx,
     result_rx: Receiver<DecodeResult>,
 }
@@ -196,6 +201,31 @@ impl DecodeQueue {
             q = self.cvar.wait(q).expect("decode queue wait");
         }
     }
+
+    /// Drop queued jobs whose generation does not match `keep` (after session reset).
+    /// Already-running worker jobs (up to worker count) finish naturally; their results
+    /// are discarded in [`ImageCache::apply_decode_result`].
+    fn drop_stale_generation(&self, keep: u64) {
+        let mut q = self.jobs.lock().expect("decode queue lock");
+        let mut bytes = self.queued_bytes.lock().expect("decode bytes lock");
+        let mut kept = VecDeque::new();
+        let mut kept_bytes = 0usize;
+        for job in q.drain(..) {
+            if job.generation == keep {
+                kept_bytes = kept_bytes.saturating_add(job.bytes.len());
+                kept.push_back(job);
+            }
+        }
+        *q = kept;
+        *bytes = kept_bytes;
+    }
+
+    #[cfg(test)]
+    fn queued_len_and_bytes(&self) -> (usize, usize) {
+        let q = self.jobs.lock().expect("decode queue lock");
+        let bytes = self.queued_bytes.lock().expect("decode bytes lock");
+        (q.len(), *bytes)
+    }
 }
 
 /// Sender side: enqueue decode work for the worker pool.
@@ -213,6 +243,10 @@ impl DecodeJobTx {
             None => Ok(()),
             Some(rejected) => Err(rejected),
         }
+    }
+
+    fn drop_stale_generation(&self, keep: u64) {
+        self.queue.drop_stale_generation(keep);
     }
 }
 
@@ -235,6 +269,7 @@ impl ImageCache {
                         url: job.url,
                         kind: job.kind,
                         result,
+                        generation: job.generation,
                     });
                 }
             });
@@ -263,9 +298,58 @@ impl ImageCache {
             order: VecDeque::new(),
             memory_bytes: 0,
             pinned_urls: HashSet::new(),
+            generation: 0,
             job_tx,
             result_rx,
         }
+    }
+
+    /// Drop all in-memory image state after logout/login.
+    ///
+    /// Bumps `generation` so in-flight decode jobs cannot re-insert Ready entries.
+    /// Drops waiting decode-queue jobs for the old generation (frees job/byte budget).
+    /// Disk avatar cache is kept. Does not touch HTTP fetch concurrency counters.
+    pub fn reset_session(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.job_tx.drop_stale_generation(self.generation);
+        self.entries.clear();
+        self.order.clear();
+        self.pinned_urls.clear();
+        self.memory_bytes = 0;
+        // Drain any already-completed decode results for the old generation.
+        while let Ok(result) = self.result_rx.try_recv() {
+            let _ = result;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    fn decode_queue_stats(&self) -> (usize, usize) {
+        self.job_tx.queue.queued_len_and_bytes()
+    }
+
+    /// Apply one decode result. Returns true if an entry changed.
+    fn apply_decode_result(&mut self, result: DecodeResult) -> bool {
+        if result.generation != self.generation {
+            // Stale session decode — drop without reintroducing Loading/Ready.
+            return false;
+        }
+        let state = match result.result {
+            Ok(out) => ready_state(out),
+            Err(()) => ImageState::Failed,
+        };
+        self.insert_entry(
+            result.url,
+            ImageEntry {
+                state,
+                kind: result.kind,
+            },
+        );
+        true
     }
 
     pub fn avatar_entries_for_draw(
@@ -417,6 +501,7 @@ impl ImageCache {
             url: url.clone(),
             kind,
             bytes,
+            generation: self.generation,
         }) {
             // Queue full / closed: free compressed bytes and mark failed so the slot can retry later.
             let _ = rejected;
@@ -437,18 +522,9 @@ impl ImageCache {
     pub fn poll(&mut self) -> bool {
         let mut changed = self.refresh_stale_avatars();
         while let Ok(result) = self.result_rx.try_recv() {
-            changed = true;
-            let state = match result.result {
-                Ok(out) => ready_state(out),
-                Err(()) => ImageState::Failed,
-            };
-            self.insert_entry(
-                result.url,
-                ImageEntry {
-                    state,
-                    kind: result.kind,
-                },
-            );
+            if self.apply_decode_result(result) {
+                changed = true;
+            }
         }
         changed
     }
@@ -798,6 +874,85 @@ mod tests {
             cache.get("http://example.com/x.png").map(|e| &e.state),
             Some(ImageState::Failed)
         ));
+    }
+
+    #[test]
+    fn reset_session_clears_loading_and_allows_rerequest() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/stuck.png".to_string();
+        assert!(cache.request(url.clone(), ImageKind::Content { max_cols: 20 }));
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Loading)
+        ));
+        let gen0 = cache.generation();
+        cache.reset_session();
+        assert_eq!(cache.generation(), gen0.wrapping_add(1));
+        assert!(cache.get(&url).is_none(), "entries must be cleared");
+        // Without reset, Loading blocked re-request; after reset it must fetch again.
+        assert!(cache.request(url.clone(), ImageKind::Content { max_cols: 20 }));
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Loading)
+        ));
+    }
+
+    #[test]
+    fn apply_decode_result_drops_stale_generation() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        let url = "http://example.com/gen.png".to_string();
+        let gen0 = cache.generation();
+        cache.reset_session();
+        assert_ne!(cache.generation(), gen0);
+        // Direct injection — no race with decode workers.
+        let applied = cache.apply_decode_result(DecodeResult {
+            url: url.clone(),
+            kind: ImageKind::Avatar,
+            result: Err(()),
+            generation: gen0,
+        });
+        assert!(!applied);
+        assert!(cache.get(&url).is_none());
+
+        let applied = cache.apply_decode_result(DecodeResult {
+            url: url.clone(),
+            kind: ImageKind::Avatar,
+            result: Err(()),
+            generation: cache.generation(),
+        });
+        assert!(applied);
+        assert!(matches!(
+            cache.get(&url).map(|e| &e.state),
+            Some(ImageState::Failed)
+        ));
+    }
+
+    #[test]
+    fn reset_session_drops_queued_decode_jobs() {
+        let mut cache = ImageCache::new(Picker::halfblocks(), None);
+        // Pause is hard; fill queue by sending jobs that workers may slowly process.
+        // Use oversized payload to make drop_stale free the byte budget even if workers lag.
+        let payload = vec![0u8; 64 * 1024];
+        for i in 0..8 {
+            let url = format!("http://example.com/q{i}.bin");
+            let _ = cache.job_tx.send(DecodeJob {
+                url,
+                kind: ImageKind::Content { max_cols: 10 },
+                bytes: payload.clone(),
+                generation: cache.generation(),
+            });
+        }
+        // Workers may have already taken some jobs; remaining must be droppable.
+        cache.reset_session();
+        let (len_after, bytes_after) = cache.decode_queue_stats();
+        assert_eq!(
+            len_after, 0,
+            "waiting jobs for old generation must be dropped"
+        );
+        assert_eq!(
+            bytes_after, 0,
+            "queued_bytes must be recalculated after drop"
+        );
     }
 
     #[test]

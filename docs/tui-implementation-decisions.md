@@ -231,3 +231,8 @@
 | 2026-07-10 | §4.3：FetchImage 真并发；内存/磁盘缓存上限；下载 8 MiB + 解码像素限制 |
 | 2026-07-10 | §4.3：详情 `FloorLayout` 缓存，消除每帧全帖 re-wrap |
 | 2026-07-10 | 详情文档坐标 `DocY=u32`；完整 logout 清 cookie/session |
+| 2026-07-10 | 网络：HTTP 按类型拆分 timeout（上传 90s）；worker 四 lane（读 latest-wins / 写串行 / 未读独立 / 图并发）；全局 request_id + 登出 barrier |
+| 2026-07-10 | 修：未读新 epoch abort 旧任务；Login 会话 barrier；ImageCache generation/reset_session；SimpleList append 分页 |
+| 2026-07-10 | Auth barrier 全程暂存读请求；reset_session 清空解码等待队列；auth_in_flight 防重复 AutoLogin |
+| 2026-07-10 | Auth barrier 结束后丢弃暂存读；Logout/登录成功清理 session UI 与登录明文 |
+| 2026-07-10 | auth_op_id 门闩：忽略过期 Session/LoginResult/LoggedOut，防登录登出互相覆盖 |

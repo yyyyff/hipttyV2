@@ -212,25 +212,27 @@ pub fn execute_command(app: &mut App, raw: &str, worker_tx: &mpsc::UnboundedSend
                 .err()
                 .map(|e| format!("清除本地凭证失败: {e}"));
             app.bump_session_epoch();
-            let send_ok = worker_tx.send(WorkerRequest::Logout).is_ok();
-            app.session.logged_in = false;
-            app.session.username = None;
-            app.session.uid = None;
-            app.unread = crate::app::UnreadState::default();
-            app.page = Page::Login;
+            // Supersede in-flight CheckSession/AutoLogin/ManualLogin results.
+            let auth_op_id = app.begin_auth_op();
+            app.auth_in_flight = true;
+            app.pending_logout_op_id = Some(auth_op_id);
+            let send_ok = worker_tx.send(WorkerRequest::Logout { auth_op_id }).is_ok();
+            // Wipe nav/detail/list/PM/composer and login secrets immediately.
+            app.reset_session_ui_for_logout();
             app.logout_local_error = local_err.clone();
             if send_ok {
-                // Final toast comes from LoggedOut (or retains local error if any).
-                app.logout_pending = true;
+                // Final toast comes from matching LoggedOut (or retains local error if any).
                 if let Some(msg) = local_err {
                     app.set_toast(msg, true);
                 }
-            } else if let Some(msg) = local_err {
-                app.logout_pending = false;
-                app.set_toast(format!("{msg}；且无法请求后台清理会话"), true);
             } else {
-                app.logout_pending = false;
-                app.set_toast("已登出，但无法请求后台清理会话", true);
+                app.pending_logout_op_id = None;
+                app.auth_in_flight = false;
+                if let Some(msg) = local_err {
+                    app.set_toast(format!("{msg}；且无法请求后台清理会话"), true);
+                } else {
+                    app.set_toast("已登出，但无法请求后台清理会话", true);
+                }
             }
         }
         "pm" => open_page(app, Page::PmList, worker_tx),
@@ -380,7 +382,7 @@ fn execute_floor_command(
                 action.clone(),
                 reply_floor_header(&post),
             ));
-            let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+            crate::event::send_prepare_post(app, worker_tx, action);
         }
         FloorCommand::Quote(_) => {
             let action = quote_post_action(&tid, &post.pid);
@@ -389,7 +391,7 @@ fn execute_floor_command(
                 action.clone(),
                 quote_header(&post),
             ));
-            let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+            crate::event::send_prepare_post(app, worker_tx, action);
         }
     }
 }
@@ -577,9 +579,8 @@ fn refresh_current_page(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerR
         }
         Page::PmThread => {
             if !app.pm_thread.peer_uid.is_empty() {
-                app.pm_thread.loading = true;
                 let uid = app.pm_thread.peer_uid.clone();
-                let _ = worker_tx.send(WorkerRequest::LoadPmThread { uid });
+                crate::handlers::request_pm_thread(app, worker_tx, uid);
             }
         }
         Page::PmList => refresh_list_page(app, worker_tx, ListPageKind::PmList),

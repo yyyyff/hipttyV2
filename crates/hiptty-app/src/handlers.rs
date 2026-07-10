@@ -121,7 +121,9 @@ pub fn activate_main_menu_item(
         5 => {
             app.overlay_state.settings_selected = 0;
             app.overlay = Overlay::Settings;
-            let _ = worker_tx.send(WorkerRequest::LoadBlacklist);
+            let request_id = app.allocate_worker_request_id();
+            app.blacklist_pending_request_id = request_id;
+            let _ = worker_tx.send(WorkerRequest::LoadBlacklist { request_id });
         }
         6 => app.quit = true,
         _ => {}
@@ -376,6 +378,7 @@ pub fn handle_pm_thread_key(
     }
 }
 
+/// First open / full replace for a list page (clears items; keeps `search_query` text).
 pub fn request_list_page(
     app: &mut App,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
@@ -389,12 +392,39 @@ pub fn request_list_page(
         app.list_page.scroll_lines = 0;
     }
     app.list_page.page = page;
+    // After reset_for, search_id is None (fresh search / page open).
+    dispatch_list_load(app, worker_tx, kind, page, None);
+}
+
+/// Load next page while keeping existing rows, selection, scroll, and search_id.
+pub fn request_list_page_append(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    kind: ListPageKind,
+    page: u32,
+) {
+    app.list_page.kind = Some(kind);
+    app.list_page.loading = true;
+    app.list_page.error = None;
+    dispatch_list_load(app, worker_tx, kind, page, app.list_page.search_id.clone());
+}
+
+fn dispatch_list_load(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    kind: ListPageKind,
+    page: u32,
+    search_id: Option<String>,
+) {
+    let request_id = app.allocate_worker_request_id();
+    app.list_page.pending_request_id = request_id;
     let _ = worker_tx.send(WorkerRequest::LoadSimpleList {
         kind,
         page,
         fid: app.feed.fid,
         query: app.list_page.search_query.clone(),
-        search_id: app.list_page.search_id.clone(),
+        search_id,
+        request_id,
     });
 }
 
@@ -411,12 +441,45 @@ pub fn refresh_list_page(
     app.list_page.loading = true;
     app.list_page.error = None;
     // Page-1 replace; keep selection until response arrives.
+    let request_id = app.allocate_worker_request_id();
+    app.list_page.pending_request_id = request_id;
     let _ = worker_tx.send(WorkerRequest::LoadSimpleList {
         kind,
         page: 1,
         fid: app.feed.fid,
         query: app.list_page.search_query.clone(),
         search_id: None,
+        request_id,
+    });
+}
+
+pub fn request_pm_thread(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    uid: String,
+) {
+    let request_id = app.allocate_worker_request_id();
+    app.pm_thread.pending_request_id = request_id;
+    app.pm_thread.loading = true;
+    let _ = worker_tx.send(WorkerRequest::LoadPmThread { uid, request_id });
+}
+
+pub fn request_thread_at_post(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    tid: String,
+    pid: String,
+) {
+    let request_id = app.allocate_worker_request_id();
+    app.detail.pending_request_id = request_id;
+    app.detail.loading = true;
+    app.detail.loading_more = false;
+    app.detail.pending_intent = None;
+    app.detail.error = None;
+    let _ = worker_tx.send(WorkerRequest::LoadThreadAtPost {
+        tid,
+        pid,
+        request_id,
     });
 }
 
@@ -435,7 +498,7 @@ pub fn maybe_load_more_list(
         .len()
         .saturating_sub(app.list_page.selected);
     if remaining <= 5 && app.list_page.page < app.list_page.max_page {
-        request_list_page(app, worker_tx, kind, app.list_page.page + 1);
+        request_list_page_append(app, worker_tx, kind, app.list_page.page + 1);
     }
 }
 
@@ -450,7 +513,7 @@ pub fn open_list_selection(app: &mut App, worker_tx: &mpsc::UnboundedSender<Work
                 let name = item.author.unwrap_or_else(|| uid.clone());
                 navigate_to(app, Page::PmThread);
                 app.pm_thread.reset(uid.clone(), name);
-                let _ = worker_tx.send(WorkerRequest::LoadPmThread { uid });
+                request_pm_thread(app, worker_tx, uid);
             }
         }
         Page::Notifications => open_notification_target(app, worker_tx, &item),
@@ -481,14 +544,13 @@ fn open_notification_target(
                 loading_more: false,
                 pending_intent: None,
                 pending_request_id: 0,
-                next_request_id: 1,
                 loaded_page_lo: 1,
                 error: None,
                 layout_revision: 0,
                 layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
-            let _ = worker_tx.send(WorkerRequest::LoadThreadAtPost { tid, pid });
+            request_thread_at_post(app, worker_tx, tid, pid);
             return;
         }
     }
@@ -498,7 +560,7 @@ fn open_notification_target(
         navigate_to(app, Page::PmThread);
         let name = item.author.clone().unwrap_or_else(|| uid.clone());
         app.pm_thread.reset(uid.clone(), name);
-        let _ = worker_tx.send(WorkerRequest::LoadPmThread { uid });
+        request_pm_thread(app, worker_tx, uid);
     }
 }
 
@@ -523,14 +585,13 @@ fn open_thread_from_item(
                 loading_more: false,
                 pending_intent: None,
                 pending_request_id: 0,
-                next_request_id: 1,
                 loaded_page_lo: 1,
                 error: None,
                 layout_revision: 0,
                 layout: None,
             };
             navigate_to(app, Page::ThreadDetail);
-            let _ = worker_tx.send(WorkerRequest::LoadThreadAtPost { tid, pid });
+            request_thread_at_post(app, worker_tx, tid, pid);
             return;
         }
     }
@@ -568,10 +629,14 @@ fn open_thread_summary(
 pub fn handle_list_response(
     app: &mut App,
     kind: ListPageKind,
+    request_id: u64,
     result: Result<hiptty_core::SimpleList, AdapterError>,
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) {
     if app.list_page.kind != Some(kind) {
+        return;
+    }
+    if request_id != app.list_page.pending_request_id {
         return;
     }
     app.list_page.loading = false;
@@ -619,12 +684,23 @@ pub fn handle_worker_extensions(
     worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) -> bool {
     match response {
-        WorkerResponse::SimpleListLoaded { kind, result } => {
-            handle_list_response(app, *kind, result.clone(), worker_tx);
+        WorkerResponse::SimpleListLoaded {
+            kind,
+            request_id,
+            result,
+        } => {
+            handle_list_response(app, *kind, *request_id, result.clone(), worker_tx);
             true
         }
-        WorkerResponse::PmThreadLoaded { uid, result } => {
+        WorkerResponse::PmThreadLoaded {
+            uid,
+            request_id,
+            result,
+        } => {
             if app.pm_thread.peer_uid != *uid {
+                return true;
+            }
+            if *request_id != app.pm_thread.pending_request_id {
                 return true;
             }
             app.pm_thread.loading = false;
@@ -658,7 +734,7 @@ pub fn handle_worker_extensions(
                     app.composer = None;
                     app.set_toast("发送成功", false);
                     if app.page == Page::PmThread && app.pm_thread.peer_uid == uid {
-                        let _ = worker_tx.send(WorkerRequest::LoadPmThread { uid });
+                        request_pm_thread(app, worker_tx, uid);
                     }
                 }
                 Err(err) => {
@@ -686,9 +762,14 @@ pub fn handle_worker_extensions(
             true
         }
         WorkerResponse::UnreadChecked {
+            session_epoch,
             has_pm,
             has_notifications,
         } => {
+            if *session_epoch != app.session_epoch {
+                // Stale session (logout/login). in_flight was cleared on epoch bump if needed.
+                return true;
+            }
             app.unread.check_in_flight = false;
             // Network errors yield None — keep previous unread flags.
             if let Some(v) = has_pm {
@@ -699,8 +780,15 @@ pub fn handle_worker_extensions(
             }
             true
         }
-        WorkerResponse::ThreadAtPostLoaded { tid, result } => {
+        WorkerResponse::ThreadAtPostLoaded {
+            tid,
+            request_id,
+            result,
+        } => {
             if app.detail.tid != *tid {
+                return true;
+            }
+            if *request_id != app.detail.pending_request_id {
                 return true;
             }
             app.detail.loading = false;
@@ -730,7 +818,10 @@ pub fn handle_worker_extensions(
             }
             true
         }
-        WorkerResponse::BlacklistLoaded { result } => {
+        WorkerResponse::BlacklistLoaded { request_id, result } => {
+            if *request_id != app.blacklist_pending_request_id {
+                return true;
+            }
             match result {
                 Ok(list) => app.blacklist_count = list.len(),
                 Err(_) => app.blacklist_count = 0,
@@ -772,7 +863,13 @@ pub fn switch_feed_forum(
     }
     app.feed = FeedState::new(fid);
     app.feed.loading = true;
-    let _ = worker_tx.send(WorkerRequest::LoadThreads { fid, page: 1 });
+    let request_id = app.allocate_worker_request_id();
+    app.feed.pending_request_id = request_id;
+    let _ = worker_tx.send(WorkerRequest::LoadThreads {
+        fid,
+        page: 1,
+        request_id,
+    });
 }
 
 pub fn cycle_default_forum_tab(app: &App, delta: i32) -> u32 {
@@ -793,4 +890,321 @@ pub fn cycle_default_forum_tab(app: &App, delta: i32) -> u32 {
         (idx + delta).rem_euclid(len) as usize
     };
     forums[next]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hiptty_core::{AdapterError, AppSettings, ThreadList};
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    fn test_app() -> App {
+        App::new(
+            AppSettings::default(),
+            PathBuf::from("/tmp/hiptty-test"),
+            "default".into(),
+        )
+    }
+
+    #[test]
+    fn stale_threads_response_does_not_clear_loading() {
+        let mut app = test_app();
+        app.feed.fid = 2;
+        app.feed.loading = true;
+        app.feed.pending_request_id = 10;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::ThreadsLoaded {
+                fid: 2,
+                page: 1,
+                request_id: 9,
+                result: Ok(ThreadList {
+                    threads: Vec::new(),
+                    page: 1,
+                    max_page: 1,
+                    uid_hint: None,
+                }),
+            },
+            &tx,
+        );
+        assert!(app.feed.loading, "stale id must not clear loading");
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn matching_threads_response_clears_loading() {
+        let mut app = test_app();
+        app.feed.fid = 2;
+        app.feed.loading = true;
+        app.feed.pending_request_id = 10;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::ThreadsLoaded {
+                fid: 2,
+                page: 1,
+                request_id: 10,
+                result: Ok(ThreadList {
+                    threads: Vec::new(),
+                    page: 1,
+                    max_page: 1,
+                    uid_hint: None,
+                }),
+            },
+            &tx,
+        );
+        assert!(!app.feed.loading);
+    }
+
+    #[test]
+    fn stale_unread_epoch_does_not_update_flags() {
+        let mut app = test_app();
+        app.session_epoch = 2;
+        app.unread.has_pm = false;
+        app.unread.check_in_flight = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(handle_worker_extensions(
+            &mut app,
+            &WorkerResponse::UnreadChecked {
+                session_epoch: 1,
+                has_pm: Some(true),
+                has_notifications: Some(true),
+            },
+            &tx,
+        ));
+        assert!(!app.unread.has_pm);
+        // Stale epoch must not free a newer in-flight check incorrectly —
+        // in_flight was for epoch 2 path only if still set; after epoch mismatch we leave alone.
+        // Here check_in_flight stays true only if we didn't clear — which is intentional for
+        // concurrent new checks. After bump_session_epoch it is cleared. Simulate stale only:
+        assert!(app.unread.check_in_flight);
+    }
+
+    #[test]
+    fn list_stale_request_id_ignored() {
+        let mut app = test_app();
+        app.list_page.kind = Some(ListPageKind::PmList);
+        app.list_page.loading = true;
+        app.list_page.pending_request_id = 5;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handle_list_response(
+            &mut app,
+            ListPageKind::PmList,
+            4,
+            Err(AdapterError::Network("request timed out".into())),
+            &tx,
+        );
+        assert!(app.list_page.loading);
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn list_append_preserves_items() {
+        use hiptty_core::ListItem;
+        let mut app = test_app();
+        app.list_page.kind = Some(ListPageKind::MyThreads);
+        app.list_page.items = vec![ListItem {
+            tid: Some("1".into()),
+            pid: None,
+            uid: None,
+            title: Some("a".into()),
+            author: None,
+            avatar_url: None,
+            forum: None,
+            time: None,
+            info: None,
+            is_new: false,
+        }];
+        app.list_page.selected = 0;
+        app.list_page.scroll_lines = 2;
+        app.list_page.page = 1;
+        app.list_page.max_page = 3;
+        app.list_page.search_id = Some("sid".into());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        request_list_page_append(&mut app, &tx, ListPageKind::MyThreads, 2);
+        assert_eq!(app.list_page.items.len(), 1, "append must not clear items");
+        assert_eq!(app.list_page.selected, 0);
+        assert_eq!(app.list_page.scroll_lines, 2);
+        assert_eq!(app.list_page.search_id.as_deref(), Some("sid"));
+        assert!(app.list_page.loading);
+        match rx.try_recv().expect("request sent") {
+            WorkerRequest::LoadSimpleList {
+                page,
+                search_id,
+                request_id,
+                ..
+            } => {
+                assert_eq!(page, 2);
+                assert_eq!(search_id.as_deref(), Some("sid"));
+                assert_eq!(request_id, app.list_page.pending_request_id);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_success_clears_password_and_security_answer() {
+        let mut app = test_app();
+        app.login.username = "alice".into();
+        app.login.password = "s3cret".into();
+        app.login.security_index = 1;
+        app.login.security_answer = "pet".into();
+        app.nav_stack.push(Page::PmList);
+        app.detail.tid = "old".into();
+        app.detail.title = "stale".into();
+        app.on_login_success("alice".into(), "s3cret");
+        assert!(app.login.password.is_empty());
+        assert!(app.login.security_answer.is_empty());
+        assert!(app.nav_stack.pop().is_none());
+        assert!(app.detail.tid.is_empty());
+        assert_eq!(app.page, Page::ThreadFeed);
+        assert!(app.session.logged_in);
+    }
+
+    #[test]
+    fn stale_login_result_ignored_after_logout_op() {
+        // AutoLogin(1) → Logout(2): ignore LoginResult(1).
+        let mut app = test_app();
+        app.page = Page::Login;
+        app.auth_in_flight = true;
+        app.latest_auth_op_id = 2;
+        app.pending_logout_op_id = Some(2);
+        app.startup_done = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::LoginResult {
+                auth_op_id: 1,
+                manual: false,
+                result: Ok(hiptty_core::SessionInfo {
+                    logged_in: true,
+                    username: Some("alice".into()),
+                    uid: Some("1".into()),
+                }),
+                username: "alice".into(),
+                password_plain: None,
+            },
+            &tx,
+        );
+        assert!(!app.session.logged_in);
+        assert_eq!(app.page, Page::Login);
+        assert!(
+            app.auth_in_flight,
+            "only matching auth response clears flag"
+        );
+    }
+
+    #[test]
+    fn stale_session_ignored_after_logout_op() {
+        // CheckSession(1) → Logout(2): ignore Session(1).
+        let mut app = test_app();
+        app.page = Page::Login;
+        app.startup_done = false;
+        app.latest_auth_op_id = 2;
+        app.pending_logout_op_id = Some(2);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::Session {
+                auth_op_id: 1,
+                info: hiptty_core::SessionInfo {
+                    logged_in: true,
+                    username: Some("alice".into()),
+                    uid: Some("1".into()),
+                },
+            },
+            &tx,
+        );
+        assert!(!app.session.logged_in);
+        assert!(!app.startup_done);
+        assert_eq!(app.page, Page::Login);
+    }
+
+    #[test]
+    fn stale_logged_out_ignored_after_manual_login() {
+        // Logout(1) → ManualLogin(2): ignore LoggedOut(1); stay logged in after LoginResult(2).
+        let mut app = test_app();
+        app.page = Page::Login;
+        app.login.password = "pw".into();
+        app.login.username = "alice".into();
+        app.latest_auth_op_id = 2;
+        app.pending_logout_op_id = Some(1); // leftover from logout
+        app.auth_in_flight = true;
+        app.logout_local_error = Some("should not toast".into());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::LoggedOut {
+                auth_op_id: 1,
+                result: Ok(()),
+            },
+            &tx,
+        );
+        assert!(app.auth_in_flight);
+        assert_eq!(app.pending_logout_op_id, Some(1));
+        assert!(app.toast.is_none());
+
+        crate::event::handle_worker_response(
+            &mut app,
+            WorkerResponse::LoginResult {
+                auth_op_id: 2,
+                manual: true,
+                result: Ok(hiptty_core::SessionInfo {
+                    logged_in: true,
+                    username: Some("alice".into()),
+                    uid: Some("1".into()),
+                }),
+                username: "alice".into(),
+                password_plain: Some("pw".into()),
+            },
+            &tx,
+        );
+        assert!(app.session.logged_in);
+        assert_eq!(app.page, Page::ThreadFeed);
+        assert!(!app.auth_in_flight);
+        assert!(app.pending_logout_op_id.is_none());
+        // Login success issues Feed load.
+        let _ = rx.try_recv();
+    }
+
+    #[test]
+    fn logout_clears_nav_detail_pm_and_secrets() {
+        let mut app = test_app();
+        app.session.logged_in = true;
+        app.session.username = Some("alice".into());
+        app.page = Page::ThreadDetail;
+        app.nav_stack.push(Page::ThreadFeed);
+        app.nav_stack.push(Page::PmList);
+        app.detail.tid = "tid99".into();
+        app.detail.title = "secret thread".into();
+        app.pm_thread.peer_uid = "42".into();
+        app.pm_thread.peer_name = "bob".into();
+        app.list_page.kind = Some(ListPageKind::Favorites);
+        app.login.password = "still-here".into();
+        app.login.security_answer = "ans".into();
+        app.composer = Some(crate::composer::ComposerState::open(
+            crate::composer::ComposerKind::Reply,
+            hiptty_core::PostAction::ReplyThread { tid: "1".into() },
+            "reply".into(),
+            String::new(),
+            None,
+        ));
+
+        app.reset_session_ui_for_logout();
+
+        assert_eq!(app.page, Page::Login);
+        assert!(!app.session.logged_in);
+        assert!(app.nav_stack.pop().is_none());
+        assert!(app.detail.tid.is_empty());
+        assert!(app.pm_thread.peer_uid.is_empty());
+        assert!(app.list_page.kind.is_none());
+        assert!(app.composer.is_none());
+        assert!(app.login.password.is_empty());
+        assert!(app.login.security_answer.is_empty());
+        // :q must not restore old session pages.
+        assert!(!crate::nav::navigate_back(&mut app));
+        assert_eq!(app.page, Page::Login);
+    }
 }

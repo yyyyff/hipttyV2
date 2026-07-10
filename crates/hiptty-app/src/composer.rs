@@ -37,6 +37,8 @@ pub struct ComposerState {
     pub preparing: bool,
     pub submitting: bool,
     pub error: Option<String>,
+    /// Latest `PreparePost` request id; stale `PrePostReady` are dropped.
+    pub pending_request_id: u64,
     pub pm_uid: Option<String>,
     /// Read-only quote/reppost block (server prepends it on submit; not part of body).
     pub quote_preview: Option<String>,
@@ -77,6 +79,7 @@ impl ComposerState {
             preparing: false,
             submitting: false,
             error: None,
+            pending_request_id: 0,
             pm_uid: None,
             quote_preview: None,
             type_choices: Vec::new(),

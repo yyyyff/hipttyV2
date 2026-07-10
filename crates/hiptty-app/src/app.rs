@@ -178,6 +178,8 @@ pub struct FeedState {
     pub max_page: u32,
     pub loading: bool,
     pub error: Option<String>,
+    /// Latest in-flight feed request id; stale `ThreadsLoaded` are dropped.
+    pub pending_request_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -194,10 +196,8 @@ pub struct DetailState {
     pub loading_more: bool,
     /// Intent for the in-flight detail request (paired with [`Self::pending_request_id`]).
     pub pending_intent: Option<DetailLoadIntent>,
-    /// Monotonic id of the latest detail request; stale responses are dropped.
+    /// Id of the latest detail request (from [`App::allocate_worker_request_id`]).
     pub pending_request_id: u64,
-    /// Next request id to allocate.
-    pub next_request_id: u64,
     /// Lowest page number currently held in `detail.posts` (for upward prepend after `G`).
     /// Highest is `detail.page`.
     pub loaded_page_lo: u32,
@@ -223,7 +223,6 @@ impl DetailState {
             loading_more: false,
             pending_intent: None,
             pending_request_id: 0,
-            next_request_id: 1,
             loaded_page_lo: 1,
             error: None,
             layout_revision: 0,
@@ -234,13 +233,6 @@ impl DetailState {
     pub fn invalidate_layout(&mut self) {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.layout = None;
-    }
-
-    pub fn allocate_request_id(&mut self) -> u64 {
-        let id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        self.pending_request_id = id;
-        id
     }
 }
 
@@ -255,6 +247,7 @@ impl FeedState {
             max_page: 0,
             loading: false,
             error: None,
+            pending_request_id: 0,
         }
     }
 }
@@ -284,6 +277,10 @@ pub struct App {
     pub overlay_state: OverlayState,
     pub unread: UnreadState,
     pub blacklist_count: usize,
+    /// Pending `LoadBlacklist` request id.
+    pub blacklist_pending_request_id: u64,
+    /// Global monotonic id for all cancelable/read worker requests.
+    next_worker_request_id: u64,
     pub quit: bool,
     pub profile: String,
     pub config_dir: std::path::PathBuf,
@@ -297,8 +294,14 @@ pub struct App {
     pub image_fetches_in_flight: usize,
     /// Bumped on login/logout so in-flight image responses cannot apply to a new session.
     pub session_epoch: u64,
-    /// Waiting for worker `LoggedOut` to confirm cookie/session cleanup.
-    pub logout_pending: bool,
+    /// Next auth operation id (`CheckSession` / login / logout).
+    next_auth_op_id: u64,
+    /// Latest auth op dispatched; only matching `auth_op_id` responses update UI.
+    pub latest_auth_op_id: u64,
+    /// Set when the latest auth op is a Logout; cleared by matching `LoggedOut`.
+    pub pending_logout_op_id: Option<u64>,
+    /// Auto/manual login or logout in flight. Cleared only by a matching auth response.
+    pub auth_in_flight: bool,
     /// Local credential-clear error retained so worker success cannot paint over it.
     pub logout_local_error: Option<String>,
     /// Next frame should emit Kitty placement deletes (scroll / layout / image ready).
@@ -347,7 +350,6 @@ impl App {
                 loading_more: false,
                 pending_intent: None,
                 pending_request_id: 0,
-                next_request_id: 1,
                 loaded_page_lo: 1,
                 error: None,
                 layout_revision: 0,
@@ -369,6 +371,8 @@ impl App {
             overlay_state: OverlayState::default(),
             unread: UnreadState::default(),
             blacklist_count: 0,
+            blacklist_pending_request_id: 0,
+            next_worker_request_id: 1,
             quit: false,
             profile,
             config_dir,
@@ -379,7 +383,10 @@ impl App {
             image_fetch_queue: std::collections::VecDeque::new(),
             image_fetches_in_flight: 0,
             session_epoch: 0,
-            logout_pending: false,
+            next_auth_op_id: 1,
+            latest_auth_op_id: 0,
+            pending_logout_op_id: None,
+            auth_in_flight: false,
             logout_local_error: None,
             graphics_dirty: true,
             last_graphics_layout: None,
@@ -477,11 +484,37 @@ impl App {
         }
     }
 
+    /// Allocate a global worker request id (never resets per page).
+    pub fn allocate_worker_request_id(&mut self) -> u64 {
+        let id = self.next_worker_request_id;
+        self.next_worker_request_id = self.next_worker_request_id.wrapping_add(1).max(1);
+        id
+    }
+
+    /// Allocate auth op id and mark it as the latest (supersedes prior auth responses).
+    pub fn begin_auth_op(&mut self) -> u64 {
+        let id = self.next_auth_op_id;
+        self.next_auth_op_id = self.next_auth_op_id.wrapping_add(1).max(1);
+        self.latest_auth_op_id = id;
+        id
+    }
+
+    /// Whether this response belongs to the latest auth operation.
+    pub fn is_current_auth_op(&self, auth_op_id: u64) -> bool {
+        auth_op_id == self.latest_auth_op_id && auth_op_id != 0
+    }
+
     /// Invalidate in-flight image work after logout/login (cookie jar may have changed).
     pub fn bump_session_epoch(&mut self) {
         self.session_epoch = self.session_epoch.wrapping_add(1);
+        // Free unread slot so a post-login check is not blocked by a pre-bump flight.
+        self.unread.check_in_flight = false;
+        if let Some(cache) = self.image_cache.as_mut() {
+            // Clears Loading/Ready memory state + bumps decode generation so old jobs cannot re-insert.
+            cache.reset_session();
+        }
         self.image_fetch_queue.clear();
-        // In-flight responses still decrement `image_fetches_in_flight` when they arrive.
+        // Do not reset image_fetches_in_flight — stale HTTP replies still free concurrency slots.
     }
 
     pub fn palette(&self) -> Palette {
@@ -972,6 +1005,67 @@ impl App {
         }
     }
 
+    /// Drop plaintext secrets from the login form (after save or logout).
+    pub fn clear_sensitive_login_fields(&mut self) {
+        self.login.password.clear();
+        self.login.security_answer.clear();
+    }
+
+    /// Clear navigable session UI (detail/list/PM/composer/nav) for a clean Feed or Login screen.
+    pub fn clear_account_pages(&mut self) {
+        self.nav_stack.clear();
+        self.detail = DetailState {
+            tid: String::new(),
+            fid: None,
+            title: String::new(),
+            reply_count: None,
+            view_count: None,
+            detail: None,
+            selected: 0,
+            scroll_top: 0,
+            loading: false,
+            loading_more: false,
+            pending_intent: None,
+            pending_request_id: 0,
+            loaded_page_lo: 1,
+            error: None,
+            layout_revision: 0,
+            layout: None,
+        };
+        self.list_page = ListPageState::default();
+        self.pm_thread = PmThreadState::default();
+        self.composer = None;
+        self.confirm_delete = None;
+        self.overlay = Overlay::None;
+        self.overlay_state = OverlayState::default();
+        self.forum_picker_selected = 0;
+        self.forum_picker_scroll = 0;
+        self.forum_picker_hits.clear();
+        self.forum_tab_hover = None;
+        self.blacklist_count = 0;
+        self.blacklist_pending_request_id = 0;
+        if let Some(cache) = self.image_cache.as_mut() {
+            cache.clear_pinned();
+        }
+        self.mark_graphics_dirty();
+    }
+
+    /// Logout / forced session end: wipe account UI + secrets, show Login.
+    /// Does not clear `auth_in_flight` / `latest_auth_op_id` — those follow the auth op id.
+    pub fn reset_session_ui_for_logout(&mut self) {
+        self.session.logged_in = false;
+        self.session.username = None;
+        self.session.uid = None;
+        self.unread = UnreadState::default();
+        self.clear_account_pages();
+        self.clear_sensitive_login_fields();
+        self.login.loading = false;
+        self.login.error = None;
+        self.startup_done = true;
+        self.feed = FeedState::new(self.settings.default_forums[0]);
+        self.page = Page::Login;
+    }
+
     pub fn on_login_success(&mut self, username: String, password_plain: &str) {
         let qid = SECURITY_QUESTIONS[self.login.security_index].0;
         let answer = if self.login.security_index == 0 {
@@ -991,6 +1085,8 @@ impl App {
         self.session.logged_in = true;
         self.login.loading = false;
         self.login.error = None;
+        self.clear_sensitive_login_fields();
+        self.clear_account_pages();
         self.page = Page::ThreadFeed;
         self.feed = FeedState::new(self.settings.default_forums[0]);
     }

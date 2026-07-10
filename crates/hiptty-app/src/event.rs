@@ -207,13 +207,21 @@ fn submit_login(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>)
         app.login.error = Some("请填写安全问题答案".into());
         return;
     }
+    if app.auth_in_flight {
+        return;
+    }
     app.login.loading = true;
     app.login.error = None;
+    app.auth_in_flight = true;
+    app.logout_local_error = None;
+    app.pending_logout_op_id = None;
+    let auth_op_id = app.begin_auth_op();
     let _ = worker_tx.send(WorkerRequest::ManualLogin {
         username: app.login.username.clone(),
         password: app.login.password.clone(),
         security_index: app.login.security_index,
         security_answer: app.login.security_answer.clone(),
+        auth_op_id,
     });
 }
 
@@ -401,7 +409,8 @@ pub fn request_thread_detail(
             app.detail.loading_more = true;
         }
     }
-    let request_id = app.detail.allocate_request_id();
+    let request_id = app.allocate_worker_request_id();
+    app.detail.pending_request_id = request_id;
     app.detail.pending_intent = Some(intent);
     app.detail.error = None;
     let _ = worker_tx.send(WorkerRequest::LoadThreadDetail {
@@ -481,9 +490,12 @@ fn request_threads(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
     }
     app.feed.loading = true;
     app.feed.error = None;
+    let request_id = app.allocate_worker_request_id();
+    app.feed.pending_request_id = request_id;
     let _ = worker_tx.send(WorkerRequest::LoadThreads {
         fid: app.feed.fid,
         page,
+        request_id,
     });
 }
 
@@ -494,9 +506,12 @@ pub fn refresh_feed(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReque
     }
     app.feed.loading = true;
     app.feed.error = None;
+    let request_id = app.allocate_worker_request_id();
+    app.feed.pending_request_id = request_id;
     let _ = worker_tx.send(WorkerRequest::LoadThreads {
         fid: app.feed.fid,
         page: 1,
+        request_id,
     });
 }
 
@@ -509,60 +524,83 @@ pub fn handle_worker_response(
         return;
     }
     match response {
-        WorkerResponse::Session(info) => {
+        WorkerResponse::Session { auth_op_id, info } => {
+            if !app.is_current_auth_op(auth_op_id) {
+                return;
+            }
             if !app.startup_done {
                 app.startup_done = true;
                 if info.logged_in {
                     app.session = info;
                     app.page = Page::ThreadFeed;
                     request_threads(app, worker_tx, 1);
-                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
+                    send_check_unread(app, worker_tx);
                 } else if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
                     app.prefill_login(&creds);
                     app.login.loading = true;
-                    let _ = worker_tx.send(WorkerRequest::AutoLogin(StoredCreds {
-                        username: creds.username,
-                        password_md5: creds.password_md5,
-                        security_question: creds.security_question,
-                        security_answer: creds.security_answer,
-                    }));
+                    app.auth_in_flight = true;
+                    app.pending_logout_op_id = None;
+                    let op = app.begin_auth_op();
+                    let _ = worker_tx.send(WorkerRequest::AutoLogin {
+                        creds: StoredCreds {
+                            username: creds.username,
+                            password_md5: creds.password_md5,
+                            security_question: creds.security_question,
+                            security_answer: creds.security_answer,
+                        },
+                        auth_op_id: op,
+                    });
                 } else {
                     app.page = Page::Login;
                 }
             }
         }
         WorkerResponse::LoginResult {
+            auth_op_id,
             manual,
             result,
             username,
             password_plain,
-        } => match result {
-            Ok(info) => {
-                app.session = info;
-                if manual {
-                    let plain = password_plain.unwrap_or_else(|| app.login.password.clone());
-                    app.on_login_success(username, &plain);
-                    request_threads(app, worker_tx, 1);
-                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
-                } else {
-                    app.session.logged_in = true;
-                    app.session.username = Some(username);
+        } => {
+            if !app.is_current_auth_op(auth_op_id) {
+                return;
+            }
+            app.auth_in_flight = false;
+            app.pending_logout_op_id = None;
+            match result {
+                Ok(info) => {
+                    app.session = info;
+                    if manual {
+                        let plain = password_plain.unwrap_or_else(|| app.login.password.clone());
+                        app.on_login_success(username, &plain);
+                        request_threads(app, worker_tx, 1);
+                        send_check_unread(app, worker_tx);
+                    } else {
+                        // Auto-login: bump epoch so prior session responses cannot apply.
+                        app.bump_session_epoch();
+                        app.session.logged_in = true;
+                        app.session.username = Some(username);
+                        app.login.loading = false;
+                        app.login.error = None;
+                        app.clear_sensitive_login_fields();
+                        app.clear_account_pages();
+                        app.page = Page::ThreadFeed;
+                        app.feed = crate::app::FeedState::new(app.settings.default_forums[0]);
+                        request_threads(app, worker_tx, 1);
+                        send_check_unread(app, worker_tx);
+                    }
+                }
+                Err(err) => {
                     app.login.loading = false;
-                    app.page = Page::ThreadFeed;
-                    request_threads(app, worker_tx, 1);
-                    let _ = worker_tx.send(WorkerRequest::CheckUnread);
+                    if manual {
+                        app.login.error = Some(error_message(&err));
+                    } else {
+                        app.set_toast(format!("自动登录失败: {}", error_message(&err)), true);
+                        app.page = Page::Login;
+                    }
                 }
             }
-            Err(err) => {
-                app.login.loading = false;
-                if manual {
-                    app.login.error = Some(error_message(&err));
-                } else {
-                    app.set_toast(format!("自动登录失败: {}", error_message(&err)), true);
-                    app.page = Page::Login;
-                }
-            }
-        },
+        }
         WorkerResponse::ThreadDetailLoaded {
             tid,
             page: _,
@@ -689,8 +727,16 @@ pub fn handle_worker_response(
                 }
             }
         }
-        WorkerResponse::ThreadsLoaded { fid, page, result } => {
+        WorkerResponse::ThreadsLoaded {
+            fid,
+            page,
+            request_id,
+            result,
+        } => {
             if app.feed.fid != fid {
+                return;
+            }
+            if request_id != app.feed.pending_request_id {
                 return;
             }
             app.feed.loading = false;
@@ -726,12 +772,14 @@ pub fn handle_worker_response(
                 }
             }
         }
-        WorkerResponse::PrePostReady { action, result } => {
-            if app
-                .composer
-                .as_ref()
-                .is_none_or(|composer| composer.action != action)
-            {
+        WorkerResponse::PrePostReady {
+            action,
+            request_id,
+            result,
+        } => {
+            if app.composer.as_ref().is_none_or(|composer| {
+                composer.action != action || composer.pending_request_id != request_id
+            }) {
                 return;
             }
             let fallback = if app
@@ -812,18 +860,18 @@ pub fn handle_worker_response(
                 }
             }
         }
-        WorkerResponse::LoggedOut { result } => {
-            // UI already on Login; only toast "已登出" when local + worker cleanup both OK.
-            let pending = app.logout_pending;
-            app.logout_pending = false;
-            let local_err = app.logout_local_error.take();
-            if !pending {
-                // Spurious / late response — only surface hard worker failures.
-                if let Err(err) = result {
-                    app.set_toast(format!("登出清理失败: {err}"), true);
-                }
+        WorkerResponse::LoggedOut { auth_op_id, result } => {
+            if !app.is_current_auth_op(auth_op_id) {
+                // Superseded by a newer login/logout/session check.
                 return;
             }
+            if app.pending_logout_op_id != Some(auth_op_id) {
+                return;
+            }
+            app.pending_logout_op_id = None;
+            app.auth_in_flight = false;
+            // UI already on Login; only toast "已登出" when local + worker cleanup both OK.
+            let local_err = app.logout_local_error.take();
             match (result, local_err) {
                 (Ok(()), None) => app.set_toast("已登出", false),
                 (Ok(()), Some(local)) => {
@@ -988,14 +1036,24 @@ pub fn enqueue_image_jobs(
 }
 
 pub fn try_auto_relogin(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.auth_in_flight {
+        return;
+    }
     if let Some(creds) = crate::config::load_credentials(&app.credentials_path) {
         app.session.logged_in = false;
-        let _ = worker_tx.send(WorkerRequest::AutoLogin(StoredCreds {
-            username: creds.username,
-            password_md5: creds.password_md5,
-            security_question: creds.security_question,
-            security_answer: creds.security_answer,
-        }));
+        app.auth_in_flight = true;
+        app.pending_logout_op_id = None;
+        app.logout_local_error = None;
+        let auth_op_id = app.begin_auth_op();
+        let _ = worker_tx.send(WorkerRequest::AutoLogin {
+            creds: StoredCreds {
+                username: creds.username,
+                password_md5: creds.password_md5,
+                security_question: creds.security_question,
+                security_answer: creds.security_answer,
+            },
+            auth_op_id,
+        });
     } else {
         app.page = Page::Login;
         app.set_toast("登录已过期，请重新登录", true);
@@ -1010,8 +1068,9 @@ fn error_message(err: &AdapterError) -> String {
     err.to_string()
 }
 
-pub fn startup(_app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
-    let _ = worker_tx.send(WorkerRequest::CheckSession);
+pub fn startup(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let auth_op_id = app.begin_auth_op();
+    let _ = worker_tx.send(WorkerRequest::CheckSession { auth_op_id });
 }
 
 fn handle_composer_key(
@@ -1203,7 +1262,7 @@ fn open_new_thread(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReques
         composer.show_subject = true;
         composer.subject.clear();
     }
-    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+    send_prepare_post(app, worker_tx, action);
 }
 
 fn open_detail_reply(app: &mut App) {
@@ -1232,7 +1291,7 @@ fn open_detail_quote(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequ
         action.clone(),
         quote_header(&post),
     ));
-    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+    send_prepare_post(app, worker_tx, action);
 }
 
 #[allow(dead_code)]
@@ -1253,7 +1312,35 @@ fn open_detail_edit(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerReque
         body,
         Some(subject),
     ));
-    let _ = worker_tx.send(WorkerRequest::PreparePost { action });
+    send_prepare_post(app, worker_tx, action);
+}
+
+/// Stamp composer with a global request id and dispatch `PreparePost`.
+pub fn send_prepare_post(
+    app: &mut App,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    action: PostAction,
+) {
+    let request_id = app.allocate_worker_request_id();
+    if let Some(composer) = app.composer.as_mut() {
+        composer.pending_request_id = request_id;
+    }
+    let _ = worker_tx.send(WorkerRequest::PreparePost { action, request_id });
+}
+
+pub fn send_check_unread(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    if app.unread.check_in_flight {
+        return;
+    }
+    app.unread.check_in_flight = true;
+    if worker_tx
+        .send(WorkerRequest::CheckUnread {
+            session_epoch: app.session_epoch,
+        })
+        .is_err()
+    {
+        app.unread.check_in_flight = false;
+    }
 }
 
 #[allow(dead_code)]
@@ -1303,7 +1390,6 @@ fn apply_post_success(
                     loading_more: false,
                     pending_intent: None,
                     pending_request_id: 0,
-                    next_request_id: 1,
                     loaded_page_lo: loaded_page,
                     error: None,
                     layout_revision: 0,

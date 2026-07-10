@@ -117,7 +117,7 @@ TUI 应用核心：状态机、事件循环、绘制编排。
 |------|------|
 | `app` | `App` 状态：`Page`、`Overlay`、列表/详情/登录等 |
 | `run` | 主循环：tick（50ms）、键盘/鼠标、draw |
-| `worker` | 后台 tokio task，通过 channel 处理 `ForumClient` 请求 |
+| `worker` | 后台调度：读 scope latest-wins、写/登录串行 lane、未读独立、图片并发 |
 | `event`, `handlers` | 按键分发与 worker 响应处理 |
 | `mouse` | 点击、滚轮、滚动条拖拽 |
 | `nav` | `NavStack` 页面栈 |
@@ -139,13 +139,32 @@ TUI 应用核心：状态机、事件循环、绘制编排。
 用户输入 (键盘/鼠标)
     → event.rs / mouse.rs / handlers.rs
     → WorkerRequest (mpsc)
-    → worker.rs (tokio task)
+    → worker.rs dispatcher
+         ├─ Read scopes (Feed/Detail/SimpleList/PmThread/Blacklist/ComposerPrepare)
+         │    latest-wins：同 scope 新请求 abort 旧 JoinHandle
+         ├─ Session/Write lane（串行，永不 cancel）
+         │    CheckSession / Login / SubmitPost / SendPm / PmDelete / Upload / Logout
+         ├─ CheckUnread（独立 task + session_epoch）
+         └─ FetchImage（并发 spawn，受 IMAGE_FETCH_CONCURRENCY 限制）
     → ForumClient (hiptty-adapter)
     → WorkerResponse (mpsc)
-    → handlers.rs 更新 App 状态
+    → handlers.rs / event.rs 更新 App 状态
+         （资源键 + 全局 request_id / session_epoch 门闩）
     → draw.rs 调度 hiptty-widgets + hiptty-image
     → ratatui Terminal::draw
 ```
+
+**读请求**：`App::allocate_worker_request_id` 分配全局单调 id；各页面只保存 `pending_request_id`。响应必须同时匹配资源（fid/tid/uid/kind）与 id 才更新 loading/data。
+
+**会话 barrier**：`Logout` / `AutoLogin` / `ManualLogin` 进入 barrier 时 abort+join 在飞读/未读；barrier 期间新读与未读 **暂存**，auth 结束后 **一律丢弃**（成功登录由 UI 重新拉 Feed/unread；失败/登出不可恢复旧请求，避免 AuthRequired 环）。
+
+**auth_op_id**：`CheckSession` / 登录 / 登出带全局递增 id；`Session` / `LoginResult` / `LoggedOut` 原样返回。App 只应用 `auth_op_id == latest_auth_op_id` 的响应，避免 AutoLogin 与 `:logout` 竞态导致 UI 显示已登录而 cookie 已清。`auth_in_flight` / `pending_logout_op_id` 仅由匹配响应清除。
+
+Logout/登录成功还会 `reset_session_ui` 清 nav/详情/列表/私信/composer 与登录明文。
+
+**图片会话**：`bump_session_epoch` → `ImageCache::reset_session()`：generation+1，清空内存 entries/pins，**丢弃解码队列中旧 generation 的待执行 job**；旧 decode 结果在 `apply_decode_result` 丢弃；磁盘头像缓存保留。
+
+**HTTP 超时**（`hiptty-adapter`）：connect 5s、read idle 10s、默认 total 15s；表单 POST 30s；multipart 上传 90s。无自动重试 POST/上传。
 
 **图像路径**：`run.rs` 启动时 `Picker::from_query_stdio()` 探测协议一次；`worker` 收到 `FetchImage` 后下载解码，结果写入 `ImageCache`；绘制时 `hiptty-image::draw` 按协议渲染。
 
@@ -166,7 +185,7 @@ Profile 默认 `default`，可通过 `--profile` / `HIPTTY_PROFILE` 切换。
 
 macOS 会自动迁移旧路径 `~/Library/Application Support/hiptty/`。
 
-登录后 TUI 约每 30 秒检查一次未读私信/通知；若上一轮仍在 worker 中则跳过，避免断网时请求积压。
+登录后 TUI 约每 30 秒检查一次未读私信/通知；独立于读/写 lane，`check_in_flight` 合并避免积压；响应带 `session_epoch`，登出/重登后丢弃。
 
 ---
 

@@ -35,6 +35,8 @@ pub struct ListPageState {
     pub search_query: String,
     pub loading: bool,
     pub error: Option<String>,
+    /// Latest in-flight list request id; stale responses are dropped.
+    pub pending_request_id: u64,
 }
 
 impl ListPageState {
@@ -48,6 +50,7 @@ impl ListPageState {
         self.search_id = None;
         self.loading = false;
         self.error = None;
+        self.pending_request_id = 0;
     }
 
     pub fn search_query_for(&self, fid: u32) -> SearchQuery {
@@ -67,6 +70,8 @@ pub struct PmThreadState {
     pub scroll_lines: u16,
     pub loading: bool,
     pub error: Option<String>,
+    /// Latest in-flight PM thread request id.
+    pub pending_request_id: u64,
 }
 
 impl PmThreadState {
@@ -78,5 +83,6 @@ impl PmThreadState {
         self.scroll_lines = 0;
         self.loading = true;
         self.error = None;
+        self.pending_request_id = 0;
     }
 }

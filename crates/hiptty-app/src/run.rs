@@ -90,10 +90,7 @@ async fn run_loop<C: ForumClient + Send + Sync + 'static>(
                 && !app.unread.check_in_flight
                 && app.tick.is_multiple_of(UNREAD_CHECK_TICKS)
             {
-                app.unread.check_in_flight = true;
-                if worker_tx.send(WorkerRequest::CheckUnread).is_err() {
-                    app.unread.check_in_flight = false;
-                }
+                crate::event::send_check_unread(app, &worker_tx);
             }
         }
 
