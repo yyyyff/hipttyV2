@@ -574,6 +574,7 @@ pub fn handle_worker_response(
                     Ok(info) if info.logged_in => {
                         app.session = info;
                         app.page = Page::ThreadFeed;
+                        app.sync_window_title();
                         request_threads(app, worker_tx, 1);
                         send_check_unread(app, worker_tx);
                     }
@@ -625,6 +626,7 @@ pub fn handle_worker_response(
                         app.clear_account_pages();
                         app.page = Page::ThreadFeed;
                         app.feed = crate::app::FeedState::new(app.settings.default_forums[0]);
+                        app.sync_window_title();
                         request_threads(app, worker_tx, 1);
                         send_check_unread(app, worker_tx);
                     }
@@ -645,6 +647,7 @@ pub fn handle_worker_response(
                         app.session.username = None;
                         app.session.uid = None;
                         app.page = Page::Login;
+                        app.sync_window_title();
                     }
                 }
             }
@@ -1265,6 +1268,7 @@ fn enter_with_local_session_on_network_error(
         app.prefill_login(&creds);
         app.login.loading = false;
         app.page = Page::ThreadFeed;
+        app.sync_window_title();
         let toast = if is_retryable_network(err) {
             format!(
                 "网络异常，已用本地会话进入（可稍后刷新）: {}",
@@ -1283,6 +1287,7 @@ fn enter_with_local_session_on_network_error(
         return;
     }
     app.page = Page::Login;
+    app.sync_window_title();
     let toast = if is_retryable_network(err) {
         format!("无法连接论坛: {}", error_message(err))
     } else {
@@ -1302,6 +1307,7 @@ fn restore_session_after_auto_login_network_error(
         if app.session.username.is_none() {
             app.session.username = Some(username.to_string());
         }
+        app.sync_window_title();
         // Startup AutoLogin path: still on Startup/Login with empty feed → enter Feed.
         if matches!(app.page, Page::Startup | Page::Login) {
             app.page = Page::ThreadFeed;
@@ -1315,6 +1321,7 @@ fn restore_session_after_auto_login_network_error(
     }
     app.session.logged_in = false;
     app.page = Page::Login;
+    app.sync_window_title();
 }
 
 pub fn startup(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {

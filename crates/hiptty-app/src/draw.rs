@@ -252,6 +252,7 @@ fn shell_title_bar(frame: &mut Frame<'_>, app: &mut App, title_area: Rect, right
         username: app.session.username.as_deref(),
         has_notifications: app.unread.has_notifications,
         has_pm: app.unread.has_pm,
+        unread_hover: app.title_unread_hover,
         breadcrumb: &app.breadcrumb(),
         breadcrumb_right: right,
         forum_tabs,

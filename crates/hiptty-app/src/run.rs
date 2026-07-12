@@ -181,6 +181,9 @@ fn install_panic_hook() {
     }));
 }
 
+/// Window title while the TUI is running (Kitty/iTerm tab title).
+const WINDOW_TITLE: &str = "hiptty";
+
 /// Restore terminal without a `Terminal` handle (panic / partial setup).
 fn restore_terminal_stdio() {
     use std::io::Write;
@@ -189,7 +192,9 @@ fn restore_terminal_stdio() {
         out,
         crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::event::DisableMouseCapture,
-        crossterm::terminal::LeaveAlternateScreen
+        crossterm::terminal::LeaveAlternateScreen,
+        // Best-effort: clear app title so the tab does not stay as "hiptty" after crash.
+        crossterm::terminal::SetTitle(""),
     );
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
@@ -204,7 +209,8 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     if let Err(e) = crossterm::execute!(
         io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        crossterm::terminal::SetTitle(WINDOW_TITLE),
     ) {
         restore_terminal_stdio();
         return Err(e);
@@ -237,7 +243,8 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> i
     let leave_err = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::event::DisableMouseCapture,
-        crossterm::terminal::LeaveAlternateScreen
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::terminal::SetTitle(""),
     );
     let raw_err = crossterm::terminal::disable_raw_mode();
     let _ = clear_terminal_graphics();

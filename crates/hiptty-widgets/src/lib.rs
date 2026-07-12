@@ -61,5 +61,7 @@ pub use thread_list::{
     ensure_thread_scroll_lines as ensure_list_scroll_lines, thread_list_capacity, ThreadListProps,
     ITEM_HEIGHT,
 };
-pub use title_bar::{draw_title_bar, title_bar_hits, TitleBarHits, TitleBarProps};
+pub use title_bar::{
+    draw_title_bar, title_bar_hits, TitleBarHits, TitleBarProps, TitleUnreadHover,
+};
 pub use toast::{draw_toast, ToastProps, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS, TOAST_TICK_MS};

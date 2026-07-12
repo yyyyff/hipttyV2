@@ -7,7 +7,7 @@ use hiptty_render::{format_count, Palette};
 use hiptty_widgets::{
     forum_picker_entries, loading_status_label, page_status_label, snap_scroll_to_item,
     thread_list_capacity, FloorLayout, KeyHint, LoginField, ScrollBarInteraction, ScrollChrome,
-    TitleBarHits, SCROLLBAR_COLS, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS,
+    TitleBarHits, TitleUnreadHover, SCROLLBAR_COLS, TOAST_ERROR_TICKS, TOAST_SUCCESS_TICKS,
 };
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
@@ -265,6 +265,8 @@ pub struct App {
     pub forum_picker_scroll: usize,
     pub forum_picker_hits: Vec<hiptty_widgets::ForumPickerHit>,
     pub forum_tab_hover: Option<usize>,
+    /// Pointer over title-bar unread icons (hover style only).
+    pub title_unread_hover: Option<TitleUnreadHover>,
     pub tick: u64,
     pub viewport_width: u16,
     pub viewport_height: u16,
@@ -364,6 +366,7 @@ impl App {
             forum_picker_scroll: 0,
             forum_picker_hits: Vec::new(),
             forum_tab_hover: None,
+            title_unread_hover: None,
             tick: 0,
             viewport_width: 80,
             viewport_height: 24,
@@ -635,45 +638,75 @@ impl App {
                     KeyHint::new("Enter", "确认", 0),
                     KeyHint::new("Esc", "退出", 1),
                 ],
-                Page::ThreadFeed => vec![
-                    KeyHint::new("j/k", "导航", 0),
-                    KeyHint::new("Enter", "打开", 0),
-                    KeyHint::new("r", "刷新", 1),
-                    KeyHint::new("n", "新帖", 1),
-                    KeyHint::new("/", "搜索", 1),
-                    KeyHint::new("[]", "版块", 2),
-                    KeyHint::new("f", "更多", 2),
-                    KeyHint::new("Esc", "菜单", 1),
-                    KeyHint::new(":", "命令", 2),
-                ],
-                Page::ThreadDetail => vec![
-                    KeyHint::new("j/k", "滚动", 0),
-                    KeyHint::new("r", "回复", 0),
-                    KeyHint::new("b", "返回", 0),
-                    KeyHint::new("PgUp/Dn", "翻页", 1),
-                    KeyHint::new("g/G", "首/末", 2),
-                ],
-                Page::PmList => vec![
-                    KeyHint::new("j/k", "导航", 0),
-                    KeyHint::new("Enter", "打开", 0),
-                    KeyHint::new("r", "刷新", 1),
-                    KeyHint::new("d", "删除", 1),
-                    KeyHint::new("b", "返回", 0),
-                    KeyHint::new("Esc", "菜单", 1),
-                ],
-                Page::PmThread => vec![
-                    KeyHint::new("j/k", "滚动", 0),
-                    KeyHint::new("r", "回复", 0),
-                    KeyHint::new("d", "删除", 1),
-                    KeyHint::new("b", "返回", 0),
-                ],
-                Page::Notifications => vec![
-                    KeyHint::new("j/k", "导航", 0),
-                    KeyHint::new("Enter", "跳转", 0),
-                    KeyHint::new("r", "刷新", 1),
-                    KeyHint::new("b", "返回", 0),
-                    KeyHint::new("Esc", "菜单", 1),
-                ],
+                Page::ThreadFeed => {
+                    let mut hints = vec![
+                        KeyHint::new("j/k", "导航", 0),
+                        KeyHint::new("Enter", "打开", 0),
+                        KeyHint::new("r", "刷新", 1),
+                        KeyHint::new("n", "新帖", 1),
+                        KeyHint::new("/", "搜索", 1),
+                        KeyHint::new("[]", "版块", 2),
+                        KeyHint::new("f", "更多", 2),
+                        KeyHint::new("Esc", "菜单", 1),
+                        KeyHint::new(":", "命令", 2),
+                    ];
+                    if self.unread.has_pm || self.unread.has_notifications {
+                        hints.insert(2, KeyHint::new("m", "未读", 1));
+                    }
+                    hints
+                }
+                Page::ThreadDetail => {
+                    let mut hints = vec![
+                        KeyHint::new("j/k", "滚动", 0),
+                        KeyHint::new("r", "回复", 0),
+                        KeyHint::new("b", "返回", 0),
+                        KeyHint::new("PgUp/Dn", "翻页", 1),
+                        KeyHint::new("g/G", "首/末", 2),
+                    ];
+                    if self.unread.has_pm || self.unread.has_notifications {
+                        hints.push(KeyHint::new("m", "未读", 1));
+                    }
+                    hints
+                }
+                Page::PmList => {
+                    let mut hints = vec![
+                        KeyHint::new("j/k", "导航", 0),
+                        KeyHint::new("Enter", "打开", 0),
+                        KeyHint::new("r", "刷新", 1),
+                        KeyHint::new("d", "删除", 1),
+                        KeyHint::new("b", "返回", 0),
+                        KeyHint::new("Esc", "菜单", 1),
+                    ];
+                    if self.unread.has_notifications {
+                        hints.insert(2, KeyHint::new("m", "通知", 1));
+                    }
+                    hints
+                }
+                Page::PmThread => {
+                    let mut hints = vec![
+                        KeyHint::new("j/k", "滚动", 0),
+                        KeyHint::new("r", "回复", 0),
+                        KeyHint::new("d", "删除", 1),
+                        KeyHint::new("b", "返回", 0),
+                    ];
+                    if self.unread.has_pm || self.unread.has_notifications {
+                        hints.push(KeyHint::new("m", "未读", 1));
+                    }
+                    hints
+                }
+                Page::Notifications => {
+                    let mut hints = vec![
+                        KeyHint::new("j/k", "导航", 0),
+                        KeyHint::new("Enter", "跳转", 0),
+                        KeyHint::new("r", "刷新", 1),
+                        KeyHint::new("b", "返回", 0),
+                        KeyHint::new("Esc", "菜单", 1),
+                    ];
+                    if self.unread.has_pm {
+                        hints.insert(2, KeyHint::new("m", "私信", 1));
+                    }
+                    hints
+                }
                 Page::Search => vec![
                     KeyHint::new("j/k", "导航", 0),
                     KeyHint::new("Enter", "打开", 0),
@@ -1037,6 +1070,7 @@ impl App {
         self.forum_picker_scroll = 0;
         self.forum_picker_hits.clear();
         self.forum_tab_hover = None;
+        self.title_unread_hover = None;
         self.blacklist_count = 0;
         self.blacklist_pending_request_id = 0;
         if let Some(cache) = self.image_cache.as_mut() {
@@ -1059,6 +1093,23 @@ impl App {
         self.startup_done = true;
         self.feed = FeedState::new(self.settings.default_forums[0]);
         self.page = Page::Login;
+        self.sync_window_title();
+    }
+
+    /// Kitty/iTerm tab title: `hiptty` or `hiptty · username` when logged in.
+    pub fn sync_window_title(&self) {
+        let title = if self.session.logged_in {
+            match self.session.username.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+                Some(user) => format!("hiptty · {user}"),
+                None => "hiptty".into(),
+            }
+        } else {
+            "hiptty".into()
+        };
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle(title)
+        );
     }
 
     pub fn on_login_success(&mut self, username: String, password_plain: &str) {
@@ -1083,6 +1134,7 @@ impl App {
         self.clear_sensitive_login_fields();
         self.clear_account_pages();
         self.page = Page::ThreadFeed;
+        self.sync_window_title();
         self.feed = FeedState::new(self.settings.default_forums[0]);
     }
 

@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use hiptty_widgets::{
     apply_scroll_delta_u32, clamp_thread_scroll_lines, item_index_at_row, list_content_lines,
-    max_scroll_lines, ScrollBar, ScrollBarArrows, ITEM_HEIGHT, PM_ITEM_HEIGHT, SIMPLE_ITEM_HEIGHT,
-    WHEEL_LINES,
+    max_scroll_lines, ScrollBar, ScrollBarArrows, TitleUnreadHover, ITEM_HEIGHT, PM_ITEM_HEIGHT,
+    SIMPLE_ITEM_HEIGHT, WHEEL_LINES,
 };
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -45,10 +45,14 @@ pub fn handle_mouse(
     }
 
     update_forum_tab_hover(app, event);
+    update_title_unread_hover(app, event);
 
-    if let Some(action) = title_bar_action(app, event) {
-        apply_title_action(app, action, worker_tx);
-        return;
+    // Title icons: open only on left click — hover only updates chrome above.
+    if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        if let Some(action) = title_bar_click_action(app, event) {
+            apply_title_action(app, action, worker_tx);
+            return;
+        }
     }
 
     if let Some(offset) = scrollbar_action(app, event, current_scroll_offset(app)) {
@@ -113,6 +117,24 @@ fn update_forum_tab_hover(app: &mut App, event: MouseEvent) {
     }
 }
 
+fn update_title_unread_hover(app: &mut App, event: MouseEvent) {
+    app.title_unread_hover = None;
+    if !point_in(event.column, event.row, app.title_bar_area) {
+        return;
+    }
+    if let Some(r) = app.title_bar_hits.notifications {
+        if point_in(event.column, event.row, r) {
+            app.title_unread_hover = Some(TitleUnreadHover::Notifications);
+            return;
+        }
+    }
+    if let Some(r) = app.title_bar_hits.pm {
+        if point_in(event.column, event.row, r) {
+            app.title_unread_hover = Some(TitleUnreadHover::Pm);
+        }
+    }
+}
+
 fn handle_settings_mouse(app: &mut App, event: MouseEvent) {
     if let Some(index) = settings_index_at(app, event.column, event.row) {
         app.overlay_state.settings_selected = index;
@@ -151,7 +173,8 @@ fn main_menu_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
+/// Click targets on the title bar (caller must already require Left Down).
+fn title_bar_click_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
     if !point_in(event.column, event.row, app.title_bar_area) {
         return None;
     }
@@ -165,8 +188,7 @@ fn title_bar_action(app: &App, event: MouseEvent) -> Option<TitleAction> {
             return Some(TitleAction::PmList);
         }
     }
-    if app.page == Page::ThreadFeed && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-    {
+    if app.page == Page::ThreadFeed {
         if let Some(index) = app.forum_tab_hover {
             return Some(TitleAction::ForumTab(index));
         }

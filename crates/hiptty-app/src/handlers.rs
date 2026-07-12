@@ -13,7 +13,7 @@ use crate::worker::{WorkerRequest, WorkerResponse};
 pub fn handle_global_key(
     app: &mut App,
     key: KeyEvent,
-    _worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
+    worker_tx: &mpsc::UnboundedSender<WorkerRequest>,
 ) -> bool {
     if app.composer.is_some() || app.confirm_delete.is_some() {
         return false;
@@ -49,8 +49,45 @@ pub fn handle_global_key(
             navigate_back(app);
             true
         }
+        // Unread inbox: only when the title-bar flags are set.
+        KeyCode::Char('m') | KeyCode::Char('M')
+            if app.session.logged_in
+                && (app.unread.has_pm || app.unread.has_notifications)
+                && !matches!(app.page, Page::Login | Page::Startup) =>
+        {
+            open_unread_inbox(app, worker_tx);
+            true
+        }
         _ => false,
     }
+}
+
+/// Open unread notifications and/or PM list (`m` / title-bar icons).
+///
+/// - Only PM unread → PM list  
+/// - Only notifications → notifications  
+/// - Both → prefer the page we are not already on (toggle); default PM first  
+pub fn open_unread_inbox(app: &mut App, worker_tx: &mpsc::UnboundedSender<WorkerRequest>) {
+    let has_pm = app.unread.has_pm;
+    let has_n = app.unread.has_notifications;
+    if !has_pm && !has_n {
+        return;
+    }
+    let target = match (has_pm, has_n, app.page) {
+        (true, true, Page::PmList) => ListPageKind::Notifications,
+        (true, true, Page::Notifications) => ListPageKind::PmList,
+        (true, true, _) => ListPageKind::PmList,
+        (true, false, _) => ListPageKind::PmList,
+        (false, true, _) => ListPageKind::Notifications,
+        (false, false, _) => return,
+    };
+    let page = match target {
+        ListPageKind::PmList => Page::PmList,
+        ListPageKind::Notifications => Page::Notifications,
+        _ => return,
+    };
+    navigate_to(app, page);
+    request_list_page(app, worker_tx, target, 1);
 }
 
 pub fn handle_overlay_key(
@@ -776,6 +813,8 @@ pub fn handle_worker_extensions(
                 return true;
             }
             app.unread.check_in_flight = false;
+            let prev_pm = app.unread.has_pm;
+            let prev_n = app.unread.has_notifications;
             // Network errors yield None — keep previous unread flags.
             if let Some(v) = has_pm {
                 app.unread.has_pm = *v;
@@ -783,6 +822,7 @@ pub fn handle_worker_extensions(
             if let Some(v) = has_notifications {
                 app.unread.has_notifications = *v;
             }
+            toast_if_new_unread(app, prev_pm, prev_n);
             true
         }
         WorkerResponse::ThreadAtPostLoaded {
@@ -866,6 +906,19 @@ fn prefetch_list_avatars(app: &mut App, worker_tx: &mpsc::UnboundedSender<Worker
 
 fn is_auth_required(err: &AdapterError) -> bool {
     matches!(err.code(), ErrorCode::AuthRequired | ErrorCode::AuthFailed)
+}
+
+/// Toast when unread flags flip false → true (new PM and/or notification).
+fn toast_if_new_unread(app: &mut App, prev_pm: bool, prev_n: bool) {
+    let new_pm = app.unread.has_pm && !prev_pm;
+    let new_n = app.unread.has_notifications && !prev_n;
+    let msg = match (new_pm, new_n) {
+        (true, true) => "有新的私信和通知 · m 打开",
+        (true, false) => "有新的私信 · m 打开",
+        (false, true) => "有新的通知 · m 打开",
+        (false, false) => return,
+    };
+    app.set_toast(msg, false);
 }
 
 pub fn switch_feed_forum(
@@ -990,11 +1043,53 @@ mod tests {
             &tx,
         ));
         assert!(!app.unread.has_pm);
+        assert!(app.toast.is_none(), "stale unread must not toast");
         // Stale epoch must not free a newer in-flight check incorrectly —
         // in_flight was for epoch 2 path only if still set; after epoch mismatch we leave alone.
         // Here check_in_flight stays true only if we didn't clear — which is intentional for
         // concurrent new checks. After bump_session_epoch it is cleared. Simulate stale only:
         assert!(app.unread.check_in_flight);
+    }
+
+    #[test]
+    fn unread_checked_toasts_on_new_flags() {
+        let mut app = test_app();
+        app.session_epoch = 1;
+        app.unread.has_pm = false;
+        app.unread.has_notifications = false;
+        app.unread.check_in_flight = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(handle_worker_extensions(
+            &mut app,
+            &WorkerResponse::UnreadChecked {
+                session_epoch: 1,
+                has_pm: Some(true),
+                has_notifications: Some(false),
+            },
+            &tx,
+        ));
+        assert!(app.unread.has_pm);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.message.contains("私信") && t.message.contains('m')),
+            "new PM should toast with m hint"
+        );
+    }
+
+    #[test]
+    fn open_unread_inbox_prefers_pm_then_toggles() {
+        let mut app = test_app();
+        app.session.logged_in = true;
+        app.page = Page::ThreadFeed;
+        app.unread.has_pm = true;
+        app.unread.has_notifications = true;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        open_unread_inbox(&mut app, &tx);
+        assert_eq!(app.page, Page::PmList);
+        let _ = rx.try_recv();
+        open_unread_inbox(&mut app, &tx);
+        assert_eq!(app.page, Page::Notifications);
     }
 
     #[test]
