@@ -4,39 +4,54 @@
 
 ## 安装（普通用户）
 
-### 一键安装（macOS / Linux）
+### 一键安装
+
+**macOS / Linux：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yyyyff/hipttyV2/main/install.sh | bash
 ```
 
-默认安装到 `~/.local/bin`（`hiptty` 与 `hiptty-cli`）。若该目录不在 `PATH` 中，脚本会提示你加入。
+**Windows（PowerShell，推荐）：**
 
-**已安装时**：脚本会询问操作：
+```powershell
+irm https://raw.githubusercontent.com/yyyyff/hipttyV2/main/install.ps1 | iex
+```
+
+**Windows（Git Bash）：** 同上可用 `install.sh`（会下载 `.zip` 并装到 `%LOCALAPPDATA%\hiptty`）。
+
+| 平台 | 默认安装目录 |
+|------|----------------|
+| macOS / Linux | `~/.local/bin` |
+| Windows | `%LOCALAPPDATA%\hiptty`（PowerShell 会尝试写入用户 PATH） |
+
+**已安装时**：脚本会询问：
 
 1. 重新安装 / 升级（默认）
-2. 卸载（会列出将删除的文件，并要求二次确认；配置目录默认保留，可再选是否删除）
+2. 卸载（列出将删除的文件，并二次确认；配置目录默认保留）
 3. 取消
 
 **直接卸载：**
 
 ```bash
+# macOS / Linux / Git Bash
 curl -fsSL https://raw.githubusercontent.com/yyyyff/hipttyV2/main/install.sh | bash -s -- --uninstall
+```
+
+```powershell
+# Windows PowerShell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/yyyyff/hipttyV2/main/install.ps1))) -Uninstall
 ```
 
 **可选环境变量：**
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `HIPTTY_INSTALL_DIR` | `~/.local/bin` | 安装目录 |
+| `HIPTTY_INSTALL_DIR` | 见上表 | 安装目录 |
 | `HIPTTY_VERSION` | `latest` | 指定 tag，如 `v0.1.0` |
 | `HIPTTY_FORCE` | （空） | 设为 `1` 时强制重装、跳过菜单 |
 
-### Windows
-
-从 [GitHub Releases](https://github.com/yyyyff/hipttyV2/releases) 下载 `hiptty-x86_64-pc-windows-msvc.zip`，解压后把目录加入 `PATH`，或在当前目录运行 `hiptty.exe`。
-
-未做代码签名时，SmartScreen 可能提示未知发布者，属预期现象。
+未做代码签名时，macOS Gatekeeper / Windows SmartScreen 可能提示未知发布者，属预期现象。
 
 ### 手动下载
 
