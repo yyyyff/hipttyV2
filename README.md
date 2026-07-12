@@ -28,7 +28,7 @@ irm https://raw.githubusercontent.com/yyyyff/hipttyV2/main/install.ps1 | iex
 **已安装时**：脚本会询问：
 
 1. 重新安装 / 升级（默认）
-2. 卸载（列出将删除的文件，并二次确认；配置目录默认保留）
+2. 卸载（列出将删除的文件，确认 `y` 后删除；配置目录默认保留）
 3. 取消
 
 **直接卸载：**

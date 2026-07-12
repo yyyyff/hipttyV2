@@ -76,7 +76,7 @@ hiptty 安装脚本
 
 用法：
   install.sh              安装或升级（默认）
-  install.sh --uninstall  卸载（含二次确认）
+  install.sh --uninstall  卸载（确认后删除）
   install.sh --help       显示本帮助
 
 环境变量：
@@ -396,16 +396,6 @@ do_uninstall() {
     exit 0
   fi
 
-  info ""
-  warn "需要二次确认。"
-  info "请输入 ${BOLD}yes${RESET} 以永久删除上方列出的文件。"
-  local reply
-  reply="$(read_prompt "请输入 yes 确认：")"
-  if [[ "$reply" != "yes" ]]; then
-    warn "已取消（需精确输入：yes）。"
-    exit 0
-  fi
-
   for p in "${paths[@]}"; do
     rm -f "$p"
     ok "已删除 ${p}"
@@ -414,14 +404,8 @@ do_uninstall() {
   if [[ -d "$config_dir" ]]; then
     info ""
     if confirm_yes "是否同时删除配置目录 ${config_dir}？[y/N] "; then
-      info "请再输入 ${BOLD}yes${RESET} 确认删除配置（含凭证与会话）。"
-      reply="$(read_prompt "请输入 yes 确认删除配置：")"
-      if [[ "$reply" == "yes" ]]; then
-        rm -rf "$config_dir"
-        ok "已删除 ${config_dir}"
-      else
-        warn "已保留配置目录。"
-      fi
+      rm -rf "$config_dir"
+      ok "已删除 ${config_dir}"
     else
       info "已保留配置目录。"
     fi

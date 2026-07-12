@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   从 GitHub Releases 下载预编译包并安装 hiptty / hiptty-cli。
-  已安装时可选择升级或卸载；卸载需二次确认。
+  已安装时可选择升级或卸载；卸载前会列出文件并确认一次。
 
 .EXAMPLE
   # 安装 / 升级
@@ -234,15 +234,6 @@ function Uninstall-Hiptty {
         return
     }
 
-    Write-Info ""
-    Write-Warn "需要二次确认。"
-    Write-Info "请输入 yes 以永久删除上方列出的文件。"
-    $reply = Read-Host "请输入 yes 确认"
-    if ($reply -ne "yes") {
-        Write-Warn "已取消（需精确输入：yes）。"
-        return
-    }
-
     foreach ($p in $paths) {
         Remove-Item -LiteralPath $p -Force
         Write-Ok "已删除 $p"
@@ -251,14 +242,8 @@ function Uninstall-Hiptty {
     if (Test-Path -LiteralPath $configDir) {
         Write-Info ""
         if (Confirm-Yes "是否同时删除配置目录 $configDir ？[y/N]") {
-            Write-Info "请再输入 yes 确认删除配置（含凭证与会话）。"
-            $reply2 = Read-Host "请输入 yes 确认删除配置"
-            if ($reply2 -eq "yes") {
-                Remove-Item -LiteralPath $configDir -Recurse -Force
-                Write-Ok "已删除 $configDir"
-            } else {
-                Write-Warn "已保留配置目录。"
-            }
+            Remove-Item -LiteralPath $configDir -Recurse -Force
+            Write-Ok "已删除 $configDir"
         } else {
             Write-Info "已保留配置目录。"
         }
